@@ -7,7 +7,6 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     public const XML_PATH_PREFIX = 'hirale_asyncindex/settings/';
     public const REGISTRY_DRAIN_CONTEXT = 'hirale_asyncindex_drain_context';
     public const REGISTRY_FULL_REINDEX_CONTEXT = 'hirale_asyncindex_full_reindex_context';
-    public const CACHE_KICK_PENDING = 'hirale_asyncindex_kick_pending';
 
     public function isEnabled(): bool
     {
@@ -87,6 +86,18 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
         return Mage::getStoreConfigFlag(self::XML_PATH_PREFIX . $field);
     }
 
+    /**
+     * Operator-configured queue name that full-reindex tasks should publish
+     * onto. Empty (default) means use the queue's default queue. Set this to
+     * isolate long-running batches from real-time drain work — but be sure to
+     * also add the queue name to the queue module's `queues_csv` so a worker
+     * actually polls it.
+     */
+    public function getFullReindexQueueName(): string
+    {
+        return trim((string) Mage::getStoreConfig(self::XML_PATH_PREFIX . 'full_reindex_queue'));
+    }
+
     public function getInt(string $field, int $default, int $minimum = 1): int
     {
         $value = (int) Mage::getStoreConfig(self::XML_PATH_PREFIX . $field);
@@ -98,6 +109,12 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     }
 
     /**
+     * Enqueue a drain task. Multiple calls within the same coalesce window
+     * collapse onto a single queue job via a stable, time-bucketed job_id;
+     * `$force` skips that dedup and is used by the drain runner's own
+     * continuation, which must always fire even if it falls in the same bucket
+     * as the drain that just completed.
+     *
      * @param array<string, mixed> $payload
      */
     public function enqueueDrain(array $payload = [], bool $force = false): bool
@@ -108,18 +125,19 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
             return false;
         }
 
-        if (!$force && !$this->markKickPending()) {
-            return false;
+        $options = [
+            'timeout' => $this->getInt('max_runtime_seconds', 45) + 15,
+        ];
+        if (!$force) {
+            $options['job_id'] = $this->_drainJobId();
         }
 
-        return $this->enqueueTask($payload, [
-            'timeout' => $this->getInt('max_runtime_seconds', 45) + 15,
-        ]);
+        return $this->enqueueTask($payload, $options);
     }
 
     /**
      * @param array<string, mixed> $payload
-     * @param array<string, mixed> $options
+     * @param array<string, mixed> $options Queue::enqueue options — queue, delay, max_attempts, retry_delay, timeout, job_id, metadata
      */
     public function enqueueTask(array $payload, array $options = []): bool
     {
@@ -128,63 +146,30 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
         }
 
         try {
-            $task = Mage::getModel('hirale_queue/task');
-            if (!is_object($task) || !method_exists($task, 'addTask')) {
+            $queue = Mage::getModel('hirale_queue/queue');
+            if (!is_object($queue) || !method_exists($queue, 'enqueue')) {
                 return false;
             }
 
-            $queueOptions = [
-                'retry_count' => $this->getInt('max_attempts', 3),
+            $defaults = [
+                'max_attempts' => $this->getInt('max_attempts', 3),
                 'retry_delay' => $this->getInt('retry_delay', 60, 0),
                 'timeout' => $this->getInt('full_max_runtime_seconds', 45) + 15,
             ];
 
-            $queueOptions = array_replace($queueOptions, $options);
-            if (array_key_exists('max_attempts', $queueOptions)) {
-                $queueOptions['retry_count'] = $queueOptions['max_attempts'];
-            }
-
-            $task->addTask(
+            $queue->enqueue(
                 Hirale_AsyncIndex_Model_QueueHandler::class,
                 $payload,
-                (int) $queueOptions['retry_count'],
-                (int) $queueOptions['retry_delay'],
-                (int) $queueOptions['timeout'],
+                array_replace($defaults, $options),
             );
 
             return true;
         } catch (Throwable $e) {
-            $this->logException($e);
-            return false;
-        }
-    }
-
-    public function markKickPending(): bool
-    {
-        try {
-            if (Mage::app()->loadCache(self::CACHE_KICK_PENDING)) {
+            if ($this->_isDuplicateJobId($e)) {
                 return false;
             }
-
-            Mage::app()->saveCache(
-                '1',
-                self::CACHE_KICK_PENDING,
-                [],
-                $this->getInt('coalesce_ttl_seconds', 10),
-            );
-        } catch (Throwable $e) {
-            return true;
-        }
-
-        return true;
-    }
-
-    public function clearKickPending(): void
-    {
-        try {
-            Mage::app()->removeCache(self::CACHE_KICK_PENDING);
-        } catch (Throwable $e) {
             $this->logException($e);
+            return false;
         }
     }
 
@@ -193,5 +178,18 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
         if (class_exists('Mage')) {
             Mage::logException($e);
         }
+    }
+
+    private function _drainJobId(): string
+    {
+        $bucket = $this->getInt('coalesce_ttl_seconds', 10);
+        return 'hirale_asyncindex_drain_' . (int) floor(time() / $bucket);
+    }
+
+    private function _isDuplicateJobId(Throwable $e): bool
+    {
+        $message = $e->getMessage();
+
+        return str_contains($message, 'Duplicate entry') || str_contains($message, 'SQLSTATE[23000]');
     }
 }

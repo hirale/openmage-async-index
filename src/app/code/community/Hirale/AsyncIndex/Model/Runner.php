@@ -22,7 +22,6 @@ class Hirale_AsyncIndex_Model_Runner
             return ['processed' => 0, 'errors' => 0, 'pending' => $this->hasPendingEvents(), 'locked' => true];
         }
 
-        $helper->clearKickPending();
         try {
             return $helper->withDrainContext(function () use ($helper): array {
                 $fullReindex = Mage::getSingleton('hirale_asyncindex/fullReindex');

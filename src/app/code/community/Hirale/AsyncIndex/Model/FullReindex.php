@@ -9,6 +9,7 @@ class Hirale_AsyncIndex_Model_FullReindex
     private const STATUS_RUNNING = 'running';
     private const STATUS_SUCCEEDED = 'succeeded';
     private const STATUS_FAILED = 'failed';
+    private const STATUS_CANCELED = 'canceled';
 
     private const MODE_PRODUCT = 'product';
     private const MODE_GLOBAL = 'global';
@@ -76,31 +77,40 @@ class Hirale_AsyncIndex_Model_FullReindex
             return 0;
         }
 
-        $activeRun = $this->_loadActiveRun($processId);
-        if ($activeRun !== null) {
-            return (int) $activeRun['run_id'];
+        $connection = $this->_connection();
+        $connection->beginTransaction();
+        try {
+            $activeRun = $this->_loadActiveRunForUpdate($processId);
+            if ($activeRun !== null) {
+                $connection->commit();
+                return (int) $activeRun['run_id'];
+            }
+
+            $mode = $this->_isProductBatchProcess($process) ? self::MODE_PRODUCT : self::MODE_GLOBAL;
+            $now = $this->_now();
+            $connection->insert($this->_runTable(), [
+                'process_id' => $processId,
+                'indexer_code' => (string) $process->getIndexerCode(),
+                'mode' => $mode,
+                'status' => self::STATUS_QUEUED,
+                'cursor_value' => 0,
+                'total' => $mode === self::MODE_PRODUCT ? $this->_getProductCount() : 1,
+                'processed' => 0,
+                'event_waterline' => $this->_getEventWaterline($processId),
+                'reason' => $reason,
+                'last_error' => null,
+                'created_at' => $now,
+                'updated_at' => $now,
+                'started_at' => null,
+                'finished_at' => null,
+            ]);
+            $runId = (int) $connection->lastInsertId($this->_runTable(), 'run_id');
+            $connection->commit();
+        } catch (Throwable $e) {
+            $connection->rollBack();
+            throw $e;
         }
 
-        $mode = $this->_isProductBatchProcess($process) ? self::MODE_PRODUCT : self::MODE_GLOBAL;
-        $now = $this->_now();
-        $this->_connection()->insert($this->_runTable(), [
-            'process_id' => $processId,
-            'indexer_code' => (string) $process->getIndexerCode(),
-            'mode' => $mode,
-            'status' => self::STATUS_QUEUED,
-            'cursor_value' => 0,
-            'total' => $mode === self::MODE_PRODUCT ? $this->_getProductCount() : 1,
-            'processed' => 0,
-            'event_waterline' => $this->_getEventWaterline($processId),
-            'reason' => $reason,
-            'last_error' => null,
-            'created_at' => $now,
-            'updated_at' => $now,
-            'started_at' => null,
-            'finished_at' => null,
-        ]);
-
-        $runId = (int) $this->_connection()->lastInsertId($this->_runTable(), 'run_id');
         $process->changeStatus(Mage_Index_Model_Process::STATUS_REQUIRE_REINDEX);
         $this->enqueueRun($runId);
 
@@ -124,13 +134,21 @@ class Hirale_AsyncIndex_Model_FullReindex
 
     public function enqueueRun(int $runId, int $delay = 0): bool
     {
-        return $this->_getHelper()->enqueueTask([
+        $helper = $this->_getHelper();
+        $options = [
+            'delay' => $delay,
+            'timeout' => $helper->getInt('full_max_runtime_seconds', 45) + 15,
+        ];
+
+        $queueName = $helper->getFullReindexQueueName();
+        if ($queueName !== '') {
+            $options['queue'] = $queueName;
+        }
+
+        return $helper->enqueueTask([
             'action' => 'run_full_batch',
             'run_id' => $runId,
-        ], [
-            'delay' => $delay,
-            'timeout' => $this->_getHelper()->getInt('full_max_runtime_seconds', 45) + 15,
-        ]);
+        ], $options);
     }
 
     /**
@@ -159,6 +177,36 @@ class Hirale_AsyncIndex_Model_FullReindex
     }
 
     /**
+     * Request cooperative cancellation of a queued/running run. The worker
+     * observes the flag at the top of the next batch and transitions the run
+     * to canceled; nothing terminates mid-batch.
+     */
+    public function requestCancel(int $runId): bool
+    {
+        return $this->_connection()->update($this->_runTable(), [
+            'cancel_requested' => 1,
+            'updated_at' => $this->_now(),
+        ], [
+            'run_id = ?' => $runId,
+            'status IN (?)' => [self::STATUS_QUEUED, self::STATUS_RUNNING],
+        ]) > 0;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function listActiveRuns(): array
+    {
+        return $this->_connection()->fetchAll(sprintf(
+            'SELECT run_id, process_id, indexer_code, mode, status, cursor_value, total, processed, cancel_requested, reason, started_at, updated_at'
+            . ' FROM %s WHERE status IN (%s, %s) ORDER BY run_id ASC',
+            $this->_runTable(),
+            $this->_connection()->quote(self::STATUS_QUEUED),
+            $this->_connection()->quote(self::STATUS_RUNNING),
+        ));
+    }
+
+    /**
      * @return array{processed:int, pending:bool, locked:bool}
      */
     private function _runBatch(int $runId): array
@@ -171,6 +219,12 @@ class Hirale_AsyncIndex_Model_FullReindex
         $process = Mage::getModel('index/process')->load((int) $run['process_id']);
         if (!$process instanceof Mage_Index_Model_Process || !$process->getId()) {
             $this->_failRun($runId, 'Index process is unavailable.');
+            return ['processed' => 0, 'pending' => $this->hasActiveRuns(), 'locked' => false];
+        }
+
+        if ((int) ($run['cancel_requested'] ?? 0) === 1) {
+            $this->_cancelRun($runId, $process);
+            $this->enqueueNextActiveRun();
             return ['processed' => 0, 'pending' => $this->hasActiveRuns(), 'locked' => false];
         }
 
@@ -267,6 +321,20 @@ class Hirale_AsyncIndex_Model_FullReindex
         ], ['run_id = ?' => $runId]);
     }
 
+    private function _cancelRun(int $runId, Mage_Index_Model_Process $process): void
+    {
+        if ($process->getId()) {
+            $process->getResource()->failProcess($process);
+        }
+        $now = $this->_now();
+        $this->_connection()->update($this->_runTable(), [
+            'status' => self::STATUS_CANCELED,
+            'last_error' => 'Canceled by operator',
+            'updated_at' => $now,
+            'finished_at' => $now,
+        ], ['run_id = ?' => $runId]);
+    }
+
     private function _failRun(int $runId, string $lastError): void
     {
         $run = $this->_loadRun($runId);
@@ -354,6 +422,25 @@ class Hirale_AsyncIndex_Model_FullReindex
     {
         $row = $this->_connection()->fetchRow(sprintf(
             'SELECT * FROM %s WHERE process_id = %d AND status IN (%s, %s) ORDER BY run_id ASC LIMIT 1',
+            $this->_runTable(),
+            $processId,
+            $this->_connection()->quote(self::STATUS_QUEUED),
+            $this->_connection()->quote(self::STATUS_RUNNING),
+        ));
+
+        return is_array($row) ? $row : null;
+    }
+
+    /**
+     * Must be called inside a transaction; takes a gap lock on the
+     * (process_id, status) range so concurrent schedulers serialize.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function _loadActiveRunForUpdate(int $processId): ?array
+    {
+        $row = $this->_connection()->fetchRow(sprintf(
+            'SELECT * FROM %s WHERE process_id = %d AND status IN (%s, %s) ORDER BY run_id ASC LIMIT 1 FOR UPDATE',
             $this->_runTable(),
             $processId,
             $this->_connection()->quote(self::STATUS_QUEUED),

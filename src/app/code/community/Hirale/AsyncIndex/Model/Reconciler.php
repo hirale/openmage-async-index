@@ -27,7 +27,7 @@ class Hirale_AsyncIndex_Model_Reconciler
             return;
         }
 
-        $helper->enqueueDrain(['reason' => 'reconciler'], true);
+        $helper->enqueueDrain(['reason' => 'reconciler']);
     }
 
     private function _getRunner(): Hirale_AsyncIndex_Model_Runner

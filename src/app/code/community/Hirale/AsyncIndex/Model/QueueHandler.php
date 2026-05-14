@@ -5,14 +5,10 @@ declare(strict_types=1);
 class Hirale_AsyncIndex_Model_QueueHandler implements Hirale_Queue_Model_TaskHandlerInterface
 {
     /**
-     * @param mixed $data
+     * @param array<string, mixed> $data
      */
-    public function handle($data): void
+    public function handle(array $data): void
     {
-        if (!is_array($data)) {
-            $data = [];
-        }
-
         $payload = isset($data['data']) && is_array($data['data']) ? $data['data'] : $data;
         $action = (string) ($payload['action'] ?? 'drain_events');
 

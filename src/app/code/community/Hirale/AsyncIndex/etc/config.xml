@@ -2,7 +2,7 @@
 <config>
     <modules>
         <Hirale_AsyncIndex>
-            <version>1.1.0</version>
+            <version>1.2.0</version>
         </Hirale_AsyncIndex>
     </modules>
     <global>
@@ -55,6 +55,11 @@
         </jobs>
     </crontab>
     <default>
+        <hirale_queue_handlers>
+            <Hirale_AsyncIndex_Model_QueueHandler>
+                <model>hirale_asyncindex/queueHandler</model>
+            </Hirale_AsyncIndex_Model_QueueHandler>
+        </hirale_queue_handlers>
         <hirale_asyncindex>
             <settings>
                 <enabled>0</enabled>
@@ -68,6 +73,7 @@
                 <max_attempts>3</max_attempts>
                 <retry_delay>60</retry_delay>
                 <coalesce_ttl_seconds>10</coalesce_ttl_seconds>
+                <full_reindex_queue></full_reindex_queue>
             </settings>
         </hirale_asyncindex>
     </default>

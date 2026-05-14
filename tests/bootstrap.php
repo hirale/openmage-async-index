@@ -12,6 +12,12 @@ if (!class_exists('Mage')) {
         public static ?object $helper = null;
         public static ?object $model = null;
 
+        /** @var array<string, object> */
+        public static array $singletons = [];
+
+        /** @var array<string, mixed> */
+        public static array $registry = [];
+
         /** @var array<string, mixed> */
         public static array $config = [];
 
@@ -19,6 +25,8 @@ if (!class_exists('Mage')) {
         {
             self::$helper = null;
             self::$model = null;
+            self::$singletons = [];
+            self::$registry = [];
             self::$config = [];
         }
 
@@ -27,17 +35,29 @@ if (!class_exists('Mage')) {
             if ($alias === 'hirale_queue' && self::$helper !== null) {
                 return self::$helper;
             }
+            if ($alias === 'hirale_asyncindex') {
+                return new \Hirale_AsyncIndex_Helper_Data();
+            }
 
             throw new RuntimeException(sprintf('Helper %s is unavailable.', $alias));
         }
 
         public static function getModel(string $alias): object
         {
-            if ($alias === 'hirale_queue/task' && self::$model !== null) {
+            if (str_starts_with($alias, 'hirale_queue/') && self::$model !== null) {
                 return self::$model;
             }
 
             throw new RuntimeException(sprintf('Model %s is unavailable.', $alias));
+        }
+
+        public static function getSingleton(string $alias): object
+        {
+            if (isset(self::$singletons[$alias])) {
+                return self::$singletons[$alias];
+            }
+
+            throw new RuntimeException(sprintf('Singleton %s is unavailable.', $alias));
         }
 
         public static function getStoreConfigFlag(string $path): bool
@@ -50,6 +70,21 @@ if (!class_exists('Mage')) {
             return self::$config[$path] ?? null;
         }
 
+        public static function register(string $key, mixed $value, bool $graceful = false): void
+        {
+            self::$registry[$key] = $value;
+        }
+
+        public static function unregister(string $key): void
+        {
+            unset(self::$registry[$key]);
+        }
+
+        public static function registry(string $key): mixed
+        {
+            return self::$registry[$key] ?? null;
+        }
+
         public static function logException(Throwable $e): void
         {
         }
@@ -59,9 +94,14 @@ if (!class_exists('Mage')) {
 if (!interface_exists('Hirale_Queue_Model_TaskHandlerInterface')) {
     interface Hirale_Queue_Model_TaskHandlerInterface
     {
-        public function handle($data);
+        /**
+         * @param array<string, mixed> $task
+         */
+        public function handle(array $task): void;
     }
 }
 
+require_once __DIR__ . '/Support/Stubs.php';
 require_once __DIR__ . '/../src/app/code/community/Hirale/AsyncIndex/Helper/Data.php';
 require_once __DIR__ . '/../src/app/code/community/Hirale/AsyncIndex/Model/QueueHandler.php';
+require_once __DIR__ . '/../src/app/code/community/Hirale/AsyncIndex/Model/FullReindex.php';

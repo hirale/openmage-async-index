@@ -48,6 +48,9 @@
             ]
         ]
     },
+    "autoload": {
+        "classmap": ["lib/MahoCLI/Commands/"]
+    },
     "autoload-dev": {
         "psr-4": {
             "HiraleAsyncIndex\\Tests\\": "tests/"
