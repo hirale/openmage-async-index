@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use Hirale\Queue\Bus;
+
 class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
 {
     public const XML_PATH_PREFIX = 'hirale_asyncindex/settings/';
@@ -15,12 +17,8 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
 
     public function isQueueEnabled(): bool
     {
-        try {
-            $helper = Mage::helper('hirale_queue');
-            return is_object($helper) && method_exists($helper, 'getRedis');
-        } catch (Throwable $e) {
-            return false;
-        }
+        // v3 check: the Bus class autoloads when hirale/queue is installed.
+        return class_exists(Bus::class);
     }
 
     public function shouldRunAsync(): bool
@@ -87,11 +85,10 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     }
 
     /**
-     * Operator-configured queue name that full-reindex tasks should publish
-     * onto. Empty (default) means use the queue's default queue. Set this to
-     * isolate long-running batches from real-time drain work — but be sure to
-     * also add the queue name to the queue module's `queues_csv` so a worker
-     * actually polls it.
+     * Operator-configured queue name for full-reindex batches. Empty means
+     * use the routing in the queue module's config.xml (default queue). Set
+     * a non-empty name to route FullReindexBatchMessage onto a dedicated
+     * queue and isolate long-running batches from real-time drain work.
      */
     public function getFullReindexQueueName(): string
     {
@@ -109,65 +106,61 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     }
 
     /**
-     * Enqueue a drain task. Multiple calls within the same coalesce window
-     * collapse onto a single queue job via a stable, time-bucketed job_id;
-     * `$force` skips that dedup and is used by the drain runner's own
-     * continuation, which must always fire even if it falls in the same bucket
-     * as the drain that just completed.
+     * Dispatch a drain message via the queue bus.
      *
-     * @param array<string, mixed> $payload
+     * v3 does NOT coalesce drain dispatches — multiple drains over an
+     * already-empty event table are idempotent (Runner::drain returns
+     * immediately when no work is found).
      */
-    public function enqueueDrain(array $payload = [], bool $force = false): bool
-    {
-        $payload['action'] ??= 'drain_events';
-
+    public function enqueueDrain(
+        string $reason,
+        ?int $eventId = null,
+        ?string $entity = null,
+        ?string $type = null,
+    ): bool {
         if (!$this->isEnabled() || !$this->isQueueEnabled()) {
             return false;
         }
-
-        $options = [
-            'timeout' => $this->getInt('max_runtime_seconds', 45) + 15,
-        ];
-        if (!$force) {
-            $options['job_id'] = $this->_drainJobId();
+        try {
+            Bus::dispatch(new Hirale_AsyncIndex_Message_DrainEventsMessage(
+                reason: $reason,
+                eventId: $eventId,
+                entity: $entity,
+                type: $type,
+            ));
+            return true;
+        } catch (Throwable $e) {
+            $this->logException($e);
+            return false;
         }
-
-        return $this->enqueueTask($payload, $options);
     }
 
     /**
-     * @param array<string, mixed> $payload
-     * @param array<string, mixed> $options Queue::enqueue options — queue, delay, max_attempts, retry_delay, timeout, job_id, metadata
+     * Dispatch a full-reindex batch message. If the admin has set a non-empty
+     * `full_reindex_queue`, routes onto that queue; otherwise uses the routing
+     * in the queue module's config.xml.
      */
-    public function enqueueTask(array $payload, array $options = []): bool
+    public function enqueueFullReindexBatch(int $runId, int $delaySeconds = 0): bool
     {
         if (!$this->isEnabled() || !$this->isQueueEnabled()) {
             return false;
         }
-
         try {
-            $queue = Mage::getModel('hirale_queue/queue');
-            if (!is_object($queue) || !method_exists($queue, 'enqueue')) {
-                return false;
+            $message   = new Hirale_AsyncIndex_Message_FullReindexBatchMessage($runId);
+            $queueName = $this->getFullReindexQueueName();
+            $stamps    = $delaySeconds > 0
+                ? [new \Symfony\Component\Messenger\Stamp\DelayStamp($delaySeconds * 1000)]
+                : [];
+
+            if ($queueName !== '') {
+                Bus::dispatchOnQueue($message, $queueName, $stamps);
+            } elseif ($delaySeconds > 0) {
+                Bus::dispatchDelayed($message, $delaySeconds);
+            } else {
+                Bus::dispatch($message);
             }
-
-            $defaults = [
-                'max_attempts' => $this->getInt('max_attempts', 3),
-                'retry_delay' => $this->getInt('retry_delay', 60, 0),
-                'timeout' => $this->getInt('full_max_runtime_seconds', 45) + 15,
-            ];
-
-            $queue->enqueue(
-                Hirale_AsyncIndex_Model_QueueHandler::class,
-                $payload,
-                array_replace($defaults, $options),
-            );
-
             return true;
         } catch (Throwable $e) {
-            if ($this->_isDuplicateJobId($e)) {
-                return false;
-            }
             $this->logException($e);
             return false;
         }
@@ -178,18 +171,5 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
         if (class_exists('Mage')) {
             Mage::logException($e);
         }
-    }
-
-    private function _drainJobId(): string
-    {
-        $bucket = $this->getInt('coalesce_ttl_seconds', 10);
-        return 'hirale_asyncindex_drain_' . (int) floor(time() / $bucket);
-    }
-
-    private function _isDuplicateJobId(Throwable $e): bool
-    {
-        $message = $e->getMessage();
-
-        return str_contains($message, 'Duplicate entry') || str_contains($message, 'SQLSTATE[23000]');
     }
 }

@@ -41,6 +41,12 @@
                 </setup>
             </hirale_asyncindex_setup>
         </resources>
+        <hirale_queue>
+            <handlers>
+                <Hirale_AsyncIndex_Message_DrainEventsMessage>hirale_asyncindex/drainEventsHandler</Hirale_AsyncIndex_Message_DrainEventsMessage>
+                <Hirale_AsyncIndex_Message_FullReindexBatchMessage>hirale_asyncindex/fullReindexBatchHandler</Hirale_AsyncIndex_Message_FullReindexBatchMessage>
+            </handlers>
+        </hirale_queue>
     </global>
     <crontab>
         <jobs>
@@ -55,11 +61,6 @@
         </jobs>
     </crontab>
     <default>
-        <hirale_queue_handlers>
-            <Hirale_AsyncIndex_Model_QueueHandler>
-                <model>hirale_asyncindex/queueHandler</model>
-            </Hirale_AsyncIndex_Model_QueueHandler>
-        </hirale_queue_handlers>
         <hirale_asyncindex>
             <settings>
                 <enabled>0</enabled>

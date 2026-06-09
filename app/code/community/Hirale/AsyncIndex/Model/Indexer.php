@@ -14,12 +14,12 @@ class Hirale_AsyncIndex_Model_Indexer extends Mage_Index_Model_Indexer
         $event = $this->logEvent($entity, $entityType, $eventType, false);
         if ($event->getProcessIds()) {
             $event->save();
-            $helper->enqueueDrain([
-                'reason' => 'process_entity_action',
-                'event_id' => (int) $event->getId(),
-                'entity' => (string) $entityType,
-                'type' => (string) $eventType,
-            ]);
+            $helper->enqueueDrain(
+                reason: 'process_entity_action',
+                eventId: (int) $event->getId(),
+                entity: (string) $entityType,
+                type: (string) $eventType,
+            );
         }
 
         return $this;
@@ -32,11 +32,11 @@ class Hirale_AsyncIndex_Model_Indexer extends Mage_Index_Model_Indexer
             return parent::indexEvents($entity, $type);
         }
 
-        $helper->enqueueDrain([
-            'reason' => 'index_events',
-            'entity' => $entity,
-            'type' => $type,
-        ]);
+        $helper->enqueueDrain(
+            reason: 'index_events',
+            entity: $entity !== null ? (string) $entity : null,
+            type: $type !== null ? (string) $type : null,
+        );
 
         return $this;
     }

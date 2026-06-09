@@ -36,7 +36,7 @@ class Hirale_AsyncIndex_Model_Runner
                 );
 
                 if ($result['pending'] && $result['processed'] > 0) {
-                    $helper->enqueueDrain(['reason' => 'continuation'], true);
+                    $helper->enqueueDrain(reason: 'continuation');
                 }
 
                 return $result + ['locked' => false];

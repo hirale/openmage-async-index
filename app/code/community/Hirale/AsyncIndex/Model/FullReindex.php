@@ -134,21 +134,7 @@ class Hirale_AsyncIndex_Model_FullReindex
 
     public function enqueueRun(int $runId, int $delay = 0): bool
     {
-        $helper = $this->_getHelper();
-        $options = [
-            'delay' => $delay,
-            'timeout' => $helper->getInt('full_max_runtime_seconds', 45) + 15,
-        ];
-
-        $queueName = $helper->getFullReindexQueueName();
-        if ($queueName !== '') {
-            $options['queue'] = $queueName;
-        }
-
-        return $helper->enqueueTask([
-            'action' => 'run_full_batch',
-            'run_id' => $runId,
-        ], $options);
+        return $this->_getHelper()->enqueueFullReindexBatch($runId, $delay);
     }
 
     /**
