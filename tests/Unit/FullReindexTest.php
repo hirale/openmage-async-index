@@ -4,16 +4,21 @@ declare(strict_types=1);
 
 namespace HiraleAsyncIndex\Tests\Unit;
 
+use Hirale\Queue\Bus;
 use HiraleAsyncIndex\Tests\Support\FakeResource;
-use HiraleAsyncIndex\Tests\Support\QueueHelperStub;
-use HiraleAsyncIndex\Tests\Support\QueueStub;
 use PHPUnit\Framework\TestCase;
 
 class FullReindexTest extends TestCase
 {
+    protected function setUp(): void
+    {
+        Bus::reset();
+    }
+
     protected function tearDown(): void
     {
         \Mage::reset();
+        Bus::reset();
     }
 
     public function testRequestCancelUpdatesQueuedRow(): void
@@ -66,50 +71,46 @@ class FullReindexTest extends TestCase
         self::assertStringContainsString("status IN ('queued', 'running')", $resource->connection->lastFetchAllSql);
     }
 
-    public function testEnqueueRunPropagatesConfiguredQueueOption(): void
+    public function testEnqueueRunRoutesBatchMessageToConfiguredQueue(): void
     {
-        $queue = new QueueStub();
-        \Mage::$helper = new QueueHelperStub();
-        \Mage::$model = $queue;
         \Mage::$config = [
             'hirale_asyncindex/settings/enabled' => '1',
             'hirale_asyncindex/settings/full_reindex_queue' => 'indexer',
-            'hirale_asyncindex/settings/full_max_runtime_seconds' => '30',
         ];
 
         $fullReindex = new \Hirale_AsyncIndex_Model_FullReindex();
         $result = $fullReindex->enqueueRun(123);
 
         self::assertTrue($result);
-        self::assertCount(1, $queue->calls);
-        self::assertSame('indexer', $queue->calls[0]['options']['queue'] ?? null);
-        self::assertSame(['action' => 'run_full_batch', 'run_id' => 123], $queue->calls[0]['payload']);
+        self::assertCount(1, Bus::$dispatches);
+        self::assertSame('dispatchOnQueue', Bus::$dispatches[0]['method']);
+        self::assertSame('indexer', Bus::$dispatches[0]['queue']);
+
+        $message = Bus::$dispatches[0]['message'];
+        self::assertInstanceOf(\Hirale_AsyncIndex_Message_FullReindexBatchMessage::class, $message);
+        self::assertSame(123, $message->runId);
     }
 
-    public function testEnqueueRunOmitsQueueOptionWhenUnconfigured(): void
+    public function testEnqueueRunUsesDefaultRoutingWhenQueueUnconfigured(): void
     {
-        $queue = new QueueStub();
-        \Mage::$helper = new QueueHelperStub();
-        \Mage::$model = $queue;
         \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
 
         $fullReindex = new \Hirale_AsyncIndex_Model_FullReindex();
         $result = $fullReindex->enqueueRun(123);
 
         self::assertTrue($result);
-        self::assertArrayNotHasKey('queue', $queue->calls[0]['options']);
+        self::assertSame('dispatch', Bus::$dispatches[0]['method']);
+        self::assertNull(Bus::$dispatches[0]['queue']);
     }
 
     public function testEnqueueRunPropagatesDelay(): void
     {
-        $queue = new QueueStub();
-        \Mage::$helper = new QueueHelperStub();
-        \Mage::$model = $queue;
         \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
 
         $fullReindex = new \Hirale_AsyncIndex_Model_FullReindex();
         $fullReindex->enqueueRun(7, 15);
 
-        self::assertSame(15, $queue->calls[0]['options']['delay']);
+        self::assertSame('dispatchDelayed', Bus::$dispatches[0]['method']);
+        self::assertSame(15, Bus::$dispatches[0]['delaySeconds']);
     }
 }

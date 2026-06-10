@@ -1,38 +1,59 @@
 {
     "name": "hirale/openmage-async-index",
-    "type": "maho-module",
+    "type": "magento-module",
     "license": "OSL-3.0",
-    "description": "Asynchronous Mage index event draining for Maho using hirale/queue.",
+    "description": "Asynchronous Mage index event draining for OpenMage and Maho, using hirale/queue.",
     "keywords": [
         "maho",
         "mahoecommerce",
+        "openmage",
         "magento1",
         "index",
         "queue"
     ],
     "require": {
         "php": ">=8.3",
-        "mahocommerce/maho": "^26.5",
         "hirale/queue": "^3.0 || dev-master"
     },
     "require-dev": {
         "phpunit/phpunit": "^10.5"
     },
-    "config": {
-        "allow-plugins": {
-            "mahocommerce/maho-composer-plugin": true
+    "autoload-dev": {
+        "psr-4": {
+            "HiraleAsyncIndex\\Tests\\": "tests/"
         }
     },
-    "autoload-dev": {
-        "psr-4": { "HiraleAsyncIndex\\Tests\\": "tests/" }
-    },
     "extra": {
-        "maho-module-dir": "app/code/community/Hirale/AsyncIndex"
+        "map": [
+            [
+                "app/etc/modules/Hirale_AsyncIndex.xml",
+                "app/etc/modules/Hirale_AsyncIndex.xml"
+            ],
+            [
+                "app/code/community/Hirale/AsyncIndex",
+                "app/code/community/Hirale/AsyncIndex"
+            ]
+        ]
     },
     "scripts": {
         "test": "phpunit"
     },
     "authors": [
-        { "name": "Hirale" }
-    ]
+        {
+            "name": "Hirale"
+        }
+    ],
+    "conflict": {
+        "mahocommerce/maho": "<26.5",
+        "openmage/magento-lts": "<20.17"
+    },
+    "suggest": {
+        "mahocommerce/maho": "^26.5 — the Maho platform (alternatively openmage/magento-lts >=20.17)",
+        "magento-hackathon/magento-composer-installer": "Deploys extra.map into the OpenMage project (resolves at 1.3.2; see the hirale/queue README — Maho needs no installer plugin)"
+    },
+    "autoload": {
+        "psr-4": {
+            "MahoCLI\\Commands\\": "lib/MahoCLI/Commands/"
+        }
+    }
 }

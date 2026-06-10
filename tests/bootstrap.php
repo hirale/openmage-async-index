@@ -91,17 +91,11 @@ if (!class_exists('Mage')) {
     }
 }
 
-if (!interface_exists('Hirale_Queue_Model_TaskHandlerInterface')) {
-    interface Hirale_Queue_Model_TaskHandlerInterface
-    {
-        /**
-         * @param array<string, mixed> $task
-         */
-        public function handle(array $task): void;
-    }
-}
-
+require_once __DIR__ . '/Support/QueueBusStub.php';
 require_once __DIR__ . '/Support/Stubs.php';
-require_once __DIR__ . '/../src/app/code/community/Hirale/AsyncIndex/Helper/Data.php';
-require_once __DIR__ . '/../src/app/code/community/Hirale/AsyncIndex/Model/QueueHandler.php';
-require_once __DIR__ . '/../src/app/code/community/Hirale/AsyncIndex/Model/FullReindex.php';
+require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Helper/Data.php';
+require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Message/DrainEventsMessage.php';
+require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Message/FullReindexBatchMessage.php';
+require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Model/DrainEventsHandler.php';
+require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Model/FullReindexBatchHandler.php';
+require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Model/FullReindex.php';

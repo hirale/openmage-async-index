@@ -4,15 +4,20 @@ declare(strict_types=1);
 
 namespace HiraleAsyncIndex\Tests\Unit;
 
-use HiraleAsyncIndex\Tests\Support\QueueHelperStub;
-use HiraleAsyncIndex\Tests\Support\QueueStub;
+use Hirale\Queue\Bus;
 use PHPUnit\Framework\TestCase;
 
 class HelperDataTest extends TestCase
 {
+    protected function setUp(): void
+    {
+        Bus::reset();
+    }
+
     protected function tearDown(): void
     {
         \Mage::reset();
+        Bus::reset();
     }
 
     public function testConfigPathPrefixIsStable(): void
@@ -22,91 +27,74 @@ class HelperDataTest extends TestCase
         self::assertSame('hirale_asyncindex_full_reindex_context', \Hirale_AsyncIndex_Helper_Data::REGISTRY_FULL_REINDEX_CONTEXT);
     }
 
-    public function testQueueEnabledUsesInstalledQueueHelperCapability(): void
+    public function testQueueEnabledWhenBusClassIsAutoloadable(): void
     {
-        \Mage::$helper = new QueueHelperStub();
-
+        // v3 capability check is class_exists(Bus::class); the suite stubs Bus.
         self::assertTrue((new \Hirale_AsyncIndex_Helper_Data())->isQueueEnabled());
     }
 
-    public function testQueueDisabledWhenQueueHelperIsUnavailable(): void
+    public function testEnqueueDrainDispatchesDrainEventsMessage(): void
     {
-        self::assertFalse((new \Hirale_AsyncIndex_Helper_Data())->isQueueEnabled());
-    }
+        \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
 
-    public function testEnqueueTaskCallsQueueEnqueueWithMergedOptions(): void
-    {
-        $queue = new QueueStub();
-        \Mage::$helper = new QueueHelperStub();
-        \Mage::$model = $queue;
-        \Mage::$config = [
-            'hirale_asyncindex/settings/enabled' => '1',
-            'hirale_asyncindex/settings/max_attempts' => '5',
-            'hirale_asyncindex/settings/retry_delay' => '12',
-            'hirale_asyncindex/settings/full_max_runtime_seconds' => '80',
-        ];
-
-        $result = (new \Hirale_AsyncIndex_Helper_Data())->enqueueTask(
-            ['action' => 'drain_events'],
-            ['timeout' => 99],
+        $result = (new \Hirale_AsyncIndex_Helper_Data())->enqueueDrain(
+            'index_events',
+            42,
+            'catalog_product',
+            'save',
         );
 
         self::assertTrue($result);
-        self::assertSame([
-            [
-                'handler' => \Hirale_AsyncIndex_Model_QueueHandler::class,
-                'payload' => ['action' => 'drain_events'],
-                'options' => [
-                    'max_attempts' => 5,
-                    'retry_delay' => 12,
-                    'timeout' => 99,
-                ],
-            ],
-        ], $queue->calls);
+        self::assertCount(1, Bus::$dispatches);
+        self::assertSame('dispatch', Bus::$dispatches[0]['method']);
+
+        $message = Bus::$dispatches[0]['message'];
+        self::assertInstanceOf(\Hirale_AsyncIndex_Message_DrainEventsMessage::class, $message);
+        self::assertSame('index_events', $message->reason);
+        self::assertSame(42, $message->eventId);
+        self::assertSame('catalog_product', $message->entity);
+        self::assertSame('save', $message->type);
     }
 
-    public function testEnqueueDrainAttachesCoalesceJobId(): void
+    public function testEnqueueDrainReturnsFalseWhenModuleIsDisabled(): void
     {
-        $queue = new QueueStub();
-        \Mage::$helper = new QueueHelperStub();
-        \Mage::$model = $queue;
+        self::assertFalse((new \Hirale_AsyncIndex_Helper_Data())->enqueueDrain('index_events'));
+        self::assertSame([], Bus::$dispatches);
+    }
+
+    public function testEnqueueDrainSwallowsDispatchFailureAndLogs(): void
+    {
+        \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
+        Bus::$nextException = new \RuntimeException('transport down');
+
+        self::assertFalse((new \Hirale_AsyncIndex_Helper_Data())->enqueueDrain('index_events'));
+    }
+
+    public function testEnqueueFullReindexBatchRoutesToConfiguredQueue(): void
+    {
         \Mage::$config = [
             'hirale_asyncindex/settings/enabled' => '1',
-            'hirale_asyncindex/settings/coalesce_ttl_seconds' => '10',
+            'hirale_asyncindex/settings/full_reindex_queue' => ' indexer ',
         ];
 
-        self::assertTrue((new \Hirale_AsyncIndex_Helper_Data())->enqueueDrain());
-        self::assertCount(1, $queue->calls);
-        self::assertArrayHasKey('job_id', $queue->calls[0]['options']);
-        self::assertStringStartsWith('hirale_asyncindex_drain_', $queue->calls[0]['options']['job_id']);
+        self::assertTrue((new \Hirale_AsyncIndex_Helper_Data())->enqueueFullReindexBatch(7));
+        self::assertCount(1, Bus::$dispatches);
+        self::assertSame('dispatchOnQueue', Bus::$dispatches[0]['method']);
+        self::assertSame('indexer', Bus::$dispatches[0]['queue']);
+
+        $message = Bus::$dispatches[0]['message'];
+        self::assertInstanceOf(\Hirale_AsyncIndex_Message_FullReindexBatchMessage::class, $message);
+        self::assertSame(7, $message->runId);
     }
 
-    public function testEnqueueDrainForceSkipsJobIdSoContinuationsAlwaysFire(): void
+    public function testEnqueueFullReindexBatchUsesDelayedDispatchWithoutQueueOverride(): void
     {
-        $queue = new QueueStub();
-        \Mage::$helper = new QueueHelperStub();
-        \Mage::$model = $queue;
         \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
 
-        self::assertTrue((new \Hirale_AsyncIndex_Helper_Data())->enqueueDrain([], true));
-        self::assertCount(1, $queue->calls);
-        self::assertArrayNotHasKey('job_id', $queue->calls[0]['options']);
-    }
-
-    public function testEnqueueTaskSwallowsDuplicateJobIdAsCoalesced(): void
-    {
-        $queue = new QueueStub();
-        $queue->nextException = new \RuntimeException('SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry');
-        \Mage::$helper = new QueueHelperStub();
-        \Mage::$model = $queue;
-        \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
-
-        $result = (new \Hirale_AsyncIndex_Helper_Data())->enqueueTask(
-            ['action' => 'drain_events'],
-            ['job_id' => 'hirale_asyncindex_drain_42'],
-        );
-
-        self::assertFalse($result);
+        self::assertTrue((new \Hirale_AsyncIndex_Helper_Data())->enqueueFullReindexBatch(7, 30));
+        self::assertCount(1, Bus::$dispatches);
+        self::assertSame('dispatchDelayed', Bus::$dispatches[0]['method']);
+        self::assertSame(30, Bus::$dispatches[0]['delaySeconds']);
     }
 
     public function testGetFullReindexQueueNameReturnsEmptyByDefault(): void
@@ -121,22 +109,24 @@ class HelperDataTest extends TestCase
         self::assertSame('indexer', (new \Hirale_AsyncIndex_Helper_Data())->getFullReindexQueueName());
     }
 
-    public function testQueueHandlerSatisfiesQueueInterfaceSignature(): void
+    public function testHandlersExposeInvokableTypedSignatures(): void
     {
-        $method = new \ReflectionMethod(\Hirale_AsyncIndex_Model_QueueHandler::class, 'handle');
-        $parameter = $method->getParameters()[0];
-        $returnType = $method->getReturnType();
+        foreach ([
+            \Hirale_AsyncIndex_Model_DrainEventsHandler::class => \Hirale_AsyncIndex_Message_DrainEventsMessage::class,
+            \Hirale_AsyncIndex_Model_FullReindexBatchHandler::class => \Hirale_AsyncIndex_Message_FullReindexBatchMessage::class,
+        ] as $handler => $messageClass) {
+            $method = new \ReflectionMethod($handler, '__invoke');
+            $parameter = $method->getParameters()[0];
 
-        self::assertTrue($parameter->hasType());
-        self::assertSame('array', (string) $parameter->getType());
-        self::assertNotNull($returnType);
-        self::assertSame('void', (string) $returnType);
+            self::assertSame($messageClass, (string) $parameter->getType());
+            self::assertSame('void', (string) $method->getReturnType());
+        }
     }
 
     public function testFullReindexCallsEntityReindexOnIndexer(): void
     {
         $source = file_get_contents(
-            __DIR__ . '/../../src/app/code/community/Hirale/AsyncIndex/Model/FullReindex.php',
+            __DIR__ . '/../../app/code/community/Hirale/AsyncIndex/Model/FullReindex.php',
         );
 
         self::assertIsString($source);
