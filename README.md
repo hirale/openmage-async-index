@@ -4,14 +4,28 @@ Asynchronous core index event and full reindex orchestration for OpenMage and
 Maho.
 
 The module keeps `index_event` and `index_process_event` as the durable source
-of truth, then uses `hirale/openmage-redis-queue` to wake a background worker.
+of truth, then uses [`hirale/queue`](https://github.com/hirale/queue) to wake a background worker.
 Handlers are at least once, so the DB-backed pending event state is always used
 to decide what work remains.
 
 ## Install
 
+Requires [`hirale/queue`](https://github.com/hirale/queue) `^3.0`
+(pulled in automatically).
+
+**Maho** (26.5+):
+
 ```bash
 composer require hirale/openmage-async-index
+```
+
+**OpenMage** (20.17+, PHP 8.3+) — one-time tweaks first; details in the
+[hirale/queue README](https://github.com/hirale/queue#openmage-one-time-composer-adjustments):
+
+```bash
+composer config platform.php 8.3
+composer config allow-plugins.hirale/magento-module-installer true
+composer require hirale/magento-module-installer hirale/openmage-async-index
 ```
 
 For local development, add a path repository next to the application:
