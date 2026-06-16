@@ -166,6 +166,42 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
         }
     }
 
+    /**
+     * Acquire the mutual-exclusion lock that serializes drain / full-reindex
+     * work. Dual-platform: OpenMage ships Mage_Index_Model_Lock (static
+     * getInstance/setLock/releaseLock); Maho removed it in favour of
+     * Mage_Core_Model_Lock (core/lock singleton, acquire/release). Non-blocking
+     * — returns false when the lock is already held.
+     */
+    public function acquireIndexLock(string $name): bool
+    {
+        if (class_exists('Mage_Index_Model_Lock')) {
+            return Mage_Index_Model_Lock::getInstance()->setLock($name);
+        }
+
+        return $this->_getCoreLock()->acquire($name);
+    }
+
+    public function releaseIndexLock(string $name): void
+    {
+        if (class_exists('Mage_Index_Model_Lock')) {
+            Mage_Index_Model_Lock::getInstance()->releaseLock($name);
+            return;
+        }
+
+        $this->_getCoreLock()->release($name);
+    }
+
+    private function _getCoreLock(): Mage_Core_Model_Lock
+    {
+        $lock = Mage::getSingleton('core/lock');
+        if (!$lock instanceof Mage_Core_Model_Lock) {
+            throw new RuntimeException('Maho core/lock model is unavailable.');
+        }
+
+        return $lock;
+    }
+
     public function logException(Throwable $e): void
     {
         if (class_exists('Mage')) {

@@ -91,6 +91,37 @@ if (!class_exists('Mage')) {
     }
 }
 
+if (!class_exists('Mage_Core_Model_Lock')) {
+    // Spy stub for Maho's core/lock model (acquire/release/isHeld). OpenMage's
+    // Mage_Index_Model_Lock is intentionally NOT defined here, so the helper's
+    // class_exists() guard falls through to this Maho path under test.
+    class Mage_Core_Model_Lock
+    {
+        /** @var list<string> */
+        public array $acquired = [];
+        /** @var list<string> */
+        public array $released = [];
+        public bool $acquireResult = true;
+
+        public function acquire(string $name, bool $blocking = false): bool
+        {
+            $this->acquired[] = $name;
+            return $this->acquireResult;
+        }
+
+        public function release(string $name): bool
+        {
+            $this->released[] = $name;
+            return true;
+        }
+
+        public function isHeld(string $name): bool
+        {
+            return in_array($name, $this->acquired, true) && !in_array($name, $this->released, true);
+        }
+    }
+}
+
 require_once __DIR__ . '/Support/QueueBusStub.php';
 require_once __DIR__ . '/Support/Stubs.php';
 require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Helper/Data.php';

@@ -17,8 +17,7 @@ class Hirale_AsyncIndex_Model_Runner
             return ['processed' => 0, 'errors' => 0, 'pending' => false, 'locked' => false];
         }
 
-        $lock = Mage_Index_Model_Lock::getInstance();
-        if (!$lock->setLock(self::LOCK_NAME)) {
+        if (!$helper->acquireIndexLock(self::LOCK_NAME)) {
             return ['processed' => 0, 'errors' => 0, 'pending' => $this->hasPendingEvents(), 'locked' => true];
         }
 
@@ -42,7 +41,7 @@ class Hirale_AsyncIndex_Model_Runner
                 return $result + ['locked' => false];
             });
         } finally {
-            $lock->releaseLock(self::LOCK_NAME);
+            $helper->releaseIndexLock(self::LOCK_NAME);
         }
     }
 

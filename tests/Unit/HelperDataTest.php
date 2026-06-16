@@ -123,6 +123,35 @@ class HelperDataTest extends TestCase
         }
     }
 
+    public function testAcquireIndexLockDelegatesToMahoCoreLockWhenIndexLockAbsent(): void
+    {
+        // Regression guard: OpenMage's Mage_Index_Model_Lock does not exist on
+        // Maho. The old code called Mage_Index_Model_Lock::getInstance()
+        // unconditionally and fatally errored on Maho, stalling every drain /
+        // full-reindex run. The helper must fall back to Maho's core/lock.
+        self::assertFalse(class_exists('Mage_Index_Model_Lock'));
+
+        $lock = new \Mage_Core_Model_Lock();
+        \Mage::$singletons['core/lock'] = $lock;
+
+        $helper = new \Hirale_AsyncIndex_Helper_Data();
+
+        self::assertTrue($helper->acquireIndexLock('hirale_asyncindex_drain'));
+        self::assertSame(['hirale_asyncindex_drain'], $lock->acquired);
+
+        $helper->releaseIndexLock('hirale_asyncindex_drain');
+        self::assertSame(['hirale_asyncindex_drain'], $lock->released);
+    }
+
+    public function testAcquireIndexLockReturnsFalseWhenCoreLockHeld(): void
+    {
+        $lock = new \Mage_Core_Model_Lock();
+        $lock->acquireResult = false;
+        \Mage::$singletons['core/lock'] = $lock;
+
+        self::assertFalse((new \Hirale_AsyncIndex_Helper_Data())->acquireIndexLock('hirale_asyncindex_drain'));
+    }
+
     public function testFullReindexCallsEntityReindexOnIndexer(): void
     {
         $source = file_get_contents(

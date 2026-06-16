@@ -147,8 +147,7 @@ class Hirale_AsyncIndex_Model_FullReindex
             return ['processed' => 0, 'pending' => false, 'locked' => false];
         }
 
-        $lock = Mage_Index_Model_Lock::getInstance();
-        if (!$lock->setLock(self::LOCK_NAME)) {
+        if (!$helper->acquireIndexLock(self::LOCK_NAME)) {
             $this->enqueueRun($runId, 15);
             return ['processed' => 0, 'pending' => true, 'locked' => true];
         }
@@ -158,7 +157,7 @@ class Hirale_AsyncIndex_Model_FullReindex
                 return $this->_runBatch($runId);
             });
         } finally {
-            $lock->releaseLock(self::LOCK_NAME);
+            $helper->releaseIndexLock(self::LOCK_NAME);
         }
     }
 
