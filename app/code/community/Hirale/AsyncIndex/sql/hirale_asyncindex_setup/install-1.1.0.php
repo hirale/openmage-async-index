@@ -29,8 +29,13 @@ if (!$connection->isTableExists($stateTableName)) {
             'nullable' => false,
             'default' => 0,
         ], 'Is Managed')
-        ->addColumn('created_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => false], 'Created At')
-        ->addColumn('updated_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => false], 'Updated At')
+        // Nullable, no default: the DDL adapter rewrites a NOT NULL datetime with
+        // no default to `DEFAULT 0` — the zero date — which the strict SQL_MODE
+        // Maho pins on the connection (NO_ZERO_DATE) rejects at CREATE TABLE with
+        // error 1067, breaking a fresh install. Nullable yields `DEFAULT NULL` on
+        // both Maho and OpenMage. The setup writes both columns explicitly.
+        ->addColumn('created_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => true], 'Created At')
+        ->addColumn('updated_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => true], 'Updated At')
         ->addIndex(
             $installer->getIdxName('hirale_asyncindex/process_state', ['process_id'], Varien_Db_Adapter_Interface::INDEX_TYPE_UNIQUE),
             ['process_id'],
@@ -80,8 +85,13 @@ if (!$connection->isTableExists($runTableName)) {
         ], 'Event Waterline')
         ->addColumn('reason', Varien_Db_Ddl_Table::TYPE_TEXT, 255, ['nullable' => false], 'Run Reason')
         ->addColumn('last_error', Varien_Db_Ddl_Table::TYPE_TEXT, '64k', ['nullable' => true], 'Last Error')
-        ->addColumn('created_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => false], 'Created At')
-        ->addColumn('updated_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => false], 'Updated At')
+        // Nullable, no default: the DDL adapter rewrites a NOT NULL datetime with
+        // no default to `DEFAULT 0` — the zero date — which the strict SQL_MODE
+        // Maho pins on the connection (NO_ZERO_DATE) rejects at CREATE TABLE with
+        // error 1067, breaking a fresh install. Nullable yields `DEFAULT NULL` on
+        // both Maho and OpenMage. The setup writes both columns explicitly.
+        ->addColumn('created_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => true], 'Created At')
+        ->addColumn('updated_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => true], 'Updated At')
         ->addColumn('started_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => true], 'Started At')
         ->addColumn('finished_at', Varien_Db_Ddl_Table::TYPE_TIMESTAMP, null, ['nullable' => true], 'Finished At')
         ->addIndex($installer->getIdxName('hirale_asyncindex/full_run', ['status', 'run_id']), ['status', 'run_id'])
