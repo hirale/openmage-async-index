@@ -54,7 +54,7 @@ class Hirale_AsyncIndex_Model_ModeManager
                 'Took indexer "%s" from manual to real_time so index events are recorded;'
                 . ' the manual mode is restored when async index is disabled.',
                 (string) $process->getIndexerCode(),
-            ), Mage::LOG_NOTICE);
+            ), Hirale_AsyncIndex_Helper_Data::LOG_LEVEL_NOTICE);
         }
     }
 

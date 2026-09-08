@@ -24,6 +24,16 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     /** Keeps async index noise out of system.log on both platforms. */
     public const LOG_FILE = 'asyncindex.log';
 
+    /**
+     * Syslog severities, the one log level both platforms accept. Mage's own
+     * log-level constants are unusable here: OpenMage declares none at all, and
+     * on Maho they are Monolog enum cases rather than ints. A plain int is what
+     * both then handle — Mage_Core_Model_Logger::convertLogLevel maps 5 and 6
+     * to Notice and Info, OpenMage compares it against dev/log/max_level.
+     */
+    public const LOG_LEVEL_NOTICE = 5;
+    public const LOG_LEVEL_INFO = 6;
+
     /** Queue full-reindex batches land on when no override is configured; config.xml routes it off the fast pool. */
     public const QUEUE_FULL_REINDEX = 'full_reindex';
 
@@ -363,7 +373,7 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
         return $lock;
     }
 
-    public function log(string $message, int $level = Mage::LOG_INFO): void
+    public function log(string $message, int $level = self::LOG_LEVEL_INFO): void
     {
         Mage::log($message, $level, self::LOG_FILE);
     }

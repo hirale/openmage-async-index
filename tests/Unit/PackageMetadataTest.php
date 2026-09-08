@@ -68,6 +68,27 @@ class PackageMetadataTest extends TestCase
         );
     }
 
+    /**
+     * @return array<string, string>
+     */
+    private function modulePhpSources(): array
+    {
+        $sources = [];
+        foreach ([
+            __DIR__ . '/../../app/code/community/Hirale/AsyncIndex',
+            __DIR__ . '/../../lib/MahoCLI',
+        ] as $base) {
+            $files = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($base));
+            foreach ($files as $file) {
+                if ($file->isFile() && $file->getExtension() === 'php') {
+                    $sources[$file->getPathname()] = (string) file_get_contents($file->getPathname());
+                }
+            }
+        }
+
+        return $sources;
+    }
+
     public function testConfigRewritesIndexerAndProcessWithoutAdminRouterOverride(): void
     {
         $xml = simplexml_load_file(__DIR__ . '/../../app/code/community/Hirale/AsyncIndex/etc/config.xml');
@@ -98,20 +119,27 @@ class PackageMetadataTest extends TestCase
         $xml = simplexml_load_file(__DIR__ . '/../../app/code/community/Hirale/AsyncIndex/etc/system.xml');
         self::assertNotFalse($xml);
 
-        $sources = '';
-        $base = __DIR__ . '/../../app/code/community/Hirale/AsyncIndex';
-        $files = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($base));
-        foreach ($files as $file) {
-            if ($file->isFile() && $file->getExtension() === 'php') {
-                $sources .= (string) file_get_contents($file->getPathname());
-            }
-        }
+        $sources = implode("\n", $this->modulePhpSources());
 
         foreach ($xml->sections->hirale_asyncindex->groups->settings->fields->children() as $field => $_) {
             self::assertStringContainsString(
                 "'" . $field . "'",
                 $sources,
                 sprintf('Setting "%s" is configurable but nothing reads it.', $field),
+            );
+        }
+    }
+
+    public function testModuleNeverReferencesMageLogLevelConstants(): void
+    {
+        // OpenMage declares no Mage::LOG_* constants at all, and on Maho they
+        // are Monolog enum cases, not ints. Either way a reference here fatals
+        // on a real store, and a test stub carrying int ones would hide it.
+        foreach ($this->modulePhpSources() as $path => $source) {
+            self::assertStringNotContainsString(
+                'Mage::LOG_',
+                $source,
+                sprintf('%s uses a Mage log-level constant; use the module\'s own instead.', $path),
             );
         }
     }

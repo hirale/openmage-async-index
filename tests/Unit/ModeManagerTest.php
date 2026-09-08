@@ -71,6 +71,7 @@ class ModeManagerTest extends TestCase
         self::assertCount(1, \Mage::$logs);
         self::assertStringContainsString('catalog_product_price', \Mage::$logs[0]['message']);
         self::assertSame(\Hirale_AsyncIndex_Helper_Data::LOG_FILE, \Mage::$logs[0]['file']);
+        self::assertSame(\Hirale_AsyncIndex_Helper_Data::LOG_LEVEL_NOTICE, \Mage::$logs[0]['level']);
     }
 
     public function testProcessesAlreadyOnRealTimeCostNoQueriesAtAll(): void

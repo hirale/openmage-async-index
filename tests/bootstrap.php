@@ -40,10 +40,9 @@ if (!class_exists('Mage')) {
         /** @var list<array{message:string,level:int,file:?string}> */
         public static array $logs = [];
 
-        public const LOG_INFO = 6;
-        public const LOG_NOTICE = 5;
-        public const LOG_WARNING = 4;
-        public const LOG_ERR = 3;
+        // No LOG_* constants on purpose: OpenMage declares none, and Maho's are
+        // Monolog enum cases rather than ints. A stub that carried int ones
+        // would let module code compile here and fatal on both real platforms.
 
         public static function reset(): void
         {
