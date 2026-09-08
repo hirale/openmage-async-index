@@ -27,6 +27,7 @@ class FakeResource
             'hirale_asyncindex/full_run' => 'hirale_asyncindex_full_run',
             'hirale_asyncindex/process_state' => 'hirale_asyncindex_process_state',
             'index/process_event' => 'index_process_event',
+            'index/event' => 'index_event',
             'index/process' => 'index_process',
             'catalog/product' => 'catalog_product_entity',
         ];

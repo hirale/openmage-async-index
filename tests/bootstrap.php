@@ -189,8 +189,11 @@ if (!class_exists('Mage_Index_Model_Event')) {
     class Mage_Index_Model_Event
     {
         public int $saves = 0;
-        /** @var array<int|string, string> */
-        public array $processIds = [];
+
+        // Null until a process records an outcome, exactly like core: the event
+        // resource skips its whole process-row branch while it is not an array.
+        /** @var array<int|string, string>|null */
+        private ?array $processIds = null;
 
         public function __construct(
             private int $id = 0,
@@ -217,6 +220,12 @@ if (!class_exists('Mage_Index_Model_Event')) {
         {
             $this->processIds[$processId] = $status;
             return $this;
+        }
+
+        /** @return array<int|string, string>|null */
+        public function getProcessIds(): ?array
+        {
+            return $this->processIds;
         }
 
         public function save(): self
@@ -348,6 +357,7 @@ if (!class_exists('Mage_Index_Model_Process')) {
         public array $processedEvents = [];
         public bool $locked = false;
         public ?Throwable $processEventException = null;
+        public bool $markEventsFailed = false;
         public ?Mage_Index_Model_Indexer_Abstract $indexer = null;
 
         public function getIndexer(): ?Mage_Index_Model_Indexer_Abstract
@@ -387,6 +397,14 @@ if (!class_exists('Mage_Index_Model_Process')) {
                 throw $this->processEventException;
             }
             $this->processedEvents[] = $event;
+
+            // Core records the outcome on the event and returns normally, even
+            // when the indexer threw; it never reports the failure to the caller.
+            $event->addProcessId(
+                $this->id,
+                $this->markEventsFailed ? self::EVENT_STATUS_ERROR : self::EVENT_STATUS_DONE,
+            );
+
             return $this;
         }
     }
@@ -439,6 +457,8 @@ if (!class_exists('Mage_Core_Model_Lock')) {
         public array $acquired = [];
         /** @var list<string> */
         public array $released = [];
+        /** @var list<array{name:string,events_dispatched:int}> */
+        public array $releaseLog = [];
         public bool $acquireResult = true;
 
         public function acquire(string $name, bool $blocking = false): bool
@@ -450,6 +470,10 @@ if (!class_exists('Mage_Core_Model_Lock')) {
         public function release(string $name): bool
         {
             $this->released[] = $name;
+            // How much had been announced by the time the lock went back: lets a
+            // test prove a dispatch happened after the release, not merely that
+            // both happened.
+            $this->releaseLog[] = ['name' => $name, 'events_dispatched' => count(Mage::$events)];
             return true;
         }
 

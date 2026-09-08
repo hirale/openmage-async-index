@@ -76,9 +76,98 @@ class RunnerTest extends TestCase
 
         $lock = \Mage::$singletons['core/lock'];
         self::assertSame(['hirale_asyncindex_drain'], $lock->released);
+
+        // Nothing had been announced yet when the lock went back, and something
+        // was announced by the end: the dispatch is after the release.
+        self::assertSame(0, $lock->releaseLog[0]['events_dispatched']);
+        self::assertCount(1, \Mage::$events);
     }
 
-    public function testAFailedEventIsNotAnnouncedAsTouched(): void
+    public function testEventsCoreMarkedFailedAreCountedAndWarnedAbout(): void
+    {
+        // Core catches the indexer's exception and records the failure on the
+        // event, returning normally — so the only way to notice is the status it
+        // left behind. Nothing ever retries these.
+        $process = new \Mage_Index_Model_Process(id: 1, indexerCode: 'catalog_product_price');
+        $process->markEventsFailed = true;
+        $process->unprocessedEvents = [
+            new \Mage_Index_Model_Event(id: 1, entity: 'catalog_product', entityPk: 7),
+        ];
+        $this->bootstrap($process);
+
+        $result = (new \Hirale_AsyncIndex_Model_Runner())->drain();
+
+        self::assertSame(1, $result['errors']);
+
+        self::assertCount(1, \Mage::$logs);
+        self::assertStringContainsString('not retried', \Mage::$logs[0]['message']);
+        self::assertStringContainsString('hirale:asyncindex:events', \Mage::$logs[0]['message']);
+        self::assertSame(
+            \Hirale_AsyncIndex_Helper_Data::LOG_LEVEL_WARNING,
+            \Mage::$logs[0]['level'],
+        );
+
+        // Still announced: the indexer may have written part of the record, and
+        // invalidating one record too many is cheaper than missing one.
+        self::assertSame(['catalog_product' => [7]], \Mage::$events[0]['data']['entities']);
+    }
+
+    public function testASuccessfulDrainWarnsAboutNothing(): void
+    {
+        $process = new \Mage_Index_Model_Process(id: 1, indexerCode: 'catalog_product_price');
+        $process->unprocessedEvents = [
+            new \Mage_Index_Model_Event(id: 1, entity: 'catalog_product', entityPk: 7),
+        ];
+        $this->bootstrap($process);
+
+        $result = (new \Hirale_AsyncIndex_Model_Runner())->drain();
+
+        self::assertSame(0, $result['errors']);
+        self::assertSame([], \Mage::$logs);
+    }
+
+    public function testFailedEventsCanBeListedAndCounted(): void
+    {
+        $resource = $this->bootstrap();
+        $resource->connection->fetchOneResult = 4;
+        $resource->connection->fetchAllResponses[] = [
+            [
+                'event_id' => 12,
+                'process_id' => 1,
+                'indexer_code' => 'catalog_product_price',
+                'entity' => 'catalog_product',
+                'entity_pk' => 7,
+                'type' => 'save',
+                'created_at' => '2026-09-08 09:00:00',
+            ],
+        ];
+
+        $runner = new \Hirale_AsyncIndex_Model_Runner();
+
+        self::assertSame(4, $runner->countFailedEvents());
+
+        $rows = $runner->listFailedEvents(10);
+        self::assertCount(1, $rows);
+        self::assertSame(12, $rows[0]['event_id']);
+        self::assertStringContainsString("status = 'error'", $resource->connection->lastFetchAllSql);
+        self::assertStringContainsString('index_event', $resource->connection->lastFetchAllSql);
+    }
+
+    public function testCompletedEventRowsCanBePruned(): void
+    {
+        $resource = $this->bootstrap();
+
+        (new \Hirale_AsyncIndex_Model_Runner())->pruneCompletedEvents();
+
+        self::assertCount(1, $resource->connection->deletes);
+        self::assertSame('index_process_event', $resource->connection->deletes[0]['table']);
+        self::assertSame(
+            \Mage_Index_Model_Process::EVENT_STATUS_DONE,
+            $resource->connection->deletes[0]['where']['status = ?'],
+        );
+    }
+
+    public function testAnEventWhoseIndexerThrewPastCoreIsNotAnnouncedAsTouched(): void
     {
         $process = new \Mage_Index_Model_Process(id: 1, indexerCode: 'catalog_product_price');
         $process->processEventException = new \RuntimeException('indexer blew up');

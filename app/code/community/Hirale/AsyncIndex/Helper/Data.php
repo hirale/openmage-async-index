@@ -49,6 +49,7 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
      * both then handle — Mage_Core_Model_Logger::convertLogLevel maps 5 and 6
      * to Notice and Info, OpenMage compares it against dev/log/max_level.
      */
+    public const LOG_LEVEL_WARNING = 4;
     public const LOG_LEVEL_NOTICE = 5;
     public const LOG_LEVEL_INFO = 6;
 

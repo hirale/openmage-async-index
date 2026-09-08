@@ -193,6 +193,42 @@ invalidates `catalog_product` / `catalog_category` tags through
 `Mage::app()->cleanCache()`, which also fires core's `application_clean_cache`.
 It is off by default because the event is the better extension point.
 
+Those two are the only tags the fallback knows, because they are the only ones
+core models carry. Other entities — `cataloginventory_stock_item`,
+`catalog_product_attribute`, `core_store` — still appear in the event payload
+in full; invalidating whatever you derive from them is the host's job.
+
+## Operations
+
+```bash
+./maho hirale:asyncindex:runs                 # active full-reindex runs
+./maho hirale:asyncindex:cancel <run_id>      # cooperative cancel, after the current batch
+./maho hirale:asyncindex:events               # index events an indexer failed on
+./maho hirale:asyncindex:events --prune-done  # also drop leftover completed rows
+```
+
+### Failed events are not retried
+
+Core catches an indexer's exception, marks the event failed and returns
+normally — it never reports the failure to its caller. The drain then only ever
+selects events marked *new*, so a failed one is never looked at again: not
+retried, not counted as pending, and invisible in the admin. The index silently
+drifts.
+
+`hirale:asyncindex:events` is that missing view, and a drain that leaves
+failures behind writes a warning to `var/log/asyncindex.log`. To clear them,
+reindex the affected indexer.
+
+There is deliberately no automatic retry. An event fails because its indexer
+threw, and the input that made it throw is stored in the event row — retrying on
+a schedule re-runs the same failure forever, burning a worker each time. A retry
+worth having needs an attempt counter and a give-up state on a table this module
+does not own. Until then, failing loudly beats failing in a loop.
+
+`--prune-done` exists for one migration: full reindex runs before 2.0.0 marked
+their event rows done instead of deleting them, and nothing ever removed a done
+row. New runs delete as they go, and this clears what the old ones left.
+
 ## Runtime
 
 Enable `Hirale > Async Index` only after the queue backend is configured and
