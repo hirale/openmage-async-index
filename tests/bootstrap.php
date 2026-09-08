@@ -34,6 +34,17 @@ if (!class_exists('Mage')) {
         /** @var array<string, bool> */
         public static array $enabledModules = [];
 
+        /** @var array<int, Mage_Index_Model_Process> */
+        public static array $processes = [];
+
+        /** @var list<array{message:string,level:int,file:?string}> */
+        public static array $logs = [];
+
+        public const LOG_INFO = 6;
+        public const LOG_NOTICE = 5;
+        public const LOG_WARNING = 4;
+        public const LOG_ERR = 3;
+
         public static function reset(): void
         {
             self::$helper = null;
@@ -42,6 +53,8 @@ if (!class_exists('Mage')) {
             self::$registry = [];
             self::$config = [];
             self::$enabledModules = [];
+            self::$processes = [];
+            self::$logs = [];
         }
 
         public static function helper(string $alias): object
@@ -63,6 +76,9 @@ if (!class_exists('Mage')) {
         {
             if (str_starts_with($alias, 'hirale_queue/') && self::$model !== null) {
                 return self::$model;
+            }
+            if ($alias === 'index/process') {
+                return new \Mage_Index_Model_Process();
             }
 
             throw new RuntimeException(sprintf('Model %s is unavailable.', $alias));
@@ -104,6 +120,135 @@ if (!class_exists('Mage')) {
 
         public static function logException(Throwable $e): void
         {
+        }
+
+        public static function log(string $message, ?int $level = null, ?string $file = null): void
+        {
+            self::$logs[] = ['message' => $message, 'level' => (int) $level, 'file' => $file];
+        }
+    }
+}
+
+if (!class_exists('Mage_Index_Model_Process')) {
+    // Stub of the core process model, enough for the mode manager and the
+    // full-reindex batch machinery. load() resolves against Mage::$processes so
+    // Mage::getModel('index/process')->load($id) behaves like the real lookup.
+    class Mage_Index_Model_Process
+    {
+        public const MODE_REAL_TIME = 'real_time';
+        public const MODE_MANUAL = 'manual';
+        public const EVENT_STATUS_NEW = 'new';
+        public const EVENT_STATUS_DONE = 'done';
+        public const EVENT_STATUS_ERROR = 'error';
+        public const STATUS_PENDING = 'pending';
+        public const STATUS_REQUIRE_REINDEX = 'require_reindex';
+
+        /** @var list<string> */
+        public array $savedModes = [];
+        /** @var list<string> */
+        public array $statusChanges = [];
+        public int $reindexEverythingCalls = 0;
+        public Mage_Index_Model_Resource_Process $resource;
+
+        public function __construct(
+            private int $id = 0,
+            private string $indexerCode = '',
+            private string $mode = self::MODE_REAL_TIME,
+            private string $status = self::STATUS_PENDING,
+        ) {
+            $this->resource = new Mage_Index_Model_Resource_Process();
+        }
+
+        public function load(int $id): self
+        {
+            return Mage::$processes[$id] ?? new self();
+        }
+
+        public function getId(): int
+        {
+            return $this->id;
+        }
+
+        public function getIndexerCode(): string
+        {
+            return $this->indexerCode;
+        }
+
+        public function getMode(): string
+        {
+            return $this->mode;
+        }
+
+        public function setMode(string $mode): self
+        {
+            $this->mode = $mode;
+            return $this;
+        }
+
+        public function save(): self
+        {
+            $this->savedModes[] = $this->mode;
+            return $this;
+        }
+
+        public function getStatus(): string
+        {
+            return $this->status;
+        }
+
+        public function changeStatus(string $status): self
+        {
+            $this->statusChanges[] = $status;
+            $this->status = $status;
+            return $this;
+        }
+
+        public function reindexEverything(): self
+        {
+            $this->reindexEverythingCalls++;
+            return $this;
+        }
+
+        public function getResource(): Mage_Index_Model_Resource_Process
+        {
+            return $this->resource;
+        }
+    }
+}
+
+if (!class_exists('Mage_Index_Model_Resource_Process')) {
+    class Mage_Index_Model_Resource_Process
+    {
+        /** @var list<string> */
+        public array $calls = [];
+
+        public function startProcess(Mage_Index_Model_Process $process): void
+        {
+            $this->calls[] = 'start';
+        }
+
+        public function endProcess(Mage_Index_Model_Process $process): void
+        {
+            $this->calls[] = 'end';
+        }
+
+        public function failProcess(Mage_Index_Model_Process $process): void
+        {
+            $this->calls[] = 'fail';
+        }
+    }
+}
+
+if (!class_exists('Mage_Index_Model_Indexer')) {
+    class Mage_Index_Model_Indexer
+    {
+        /** @param list<Mage_Index_Model_Process> $processes */
+        public function __construct(private array $processes = []) {}
+
+        /** @return list<Mage_Index_Model_Process> */
+        public function getProcessesCollection(): array
+        {
+            return $this->processes;
         }
     }
 }
@@ -148,3 +293,6 @@ require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Message/FullRei
 require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Model/DrainEventsHandler.php';
 require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Model/FullReindexBatchHandler.php';
 require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Model/FullReindex.php';
+require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Model/ModeManager.php';
+require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Model/Runner.php';
+require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Model/Reconciler.php';

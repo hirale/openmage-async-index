@@ -43,12 +43,19 @@ class FakeConnection
     /** @var list<array{table:string,values:array<string, mixed>}> */
     public array $inserts = [];
 
+    /** @var list<array{table:string,values:array<string, mixed>,fields:list<string>}> */
+    public array $upserts = [];
+
+    /** @var list<array{table:string,where:mixed}> */
+    public array $deletes = [];
+
     /** @var list<list<array<string, mixed>>> */
     public array $fetchAllResponses = [];
 
     public string $lastFetchAllSql = '';
     public string $lastFetchRowSql = '';
     public int $updateResult = 0;
+    public int $fetchOneResult = 0;
     public int $insertId = 0;
     public int $transactionDepth = 0;
 
@@ -72,6 +79,25 @@ class FakeConnection
     }
 
     /**
+     * @param array<string, mixed> $values
+     * @param list<string> $fields
+     */
+    public function insertOnDuplicate(string $table, array $values, array $fields = []): int
+    {
+        $this->upserts[] = ['table' => $table, 'values' => $values, 'fields' => $fields];
+        return 1;
+    }
+
+    /**
+     * @param array<string, mixed>|string $where
+     */
+    public function delete(string $table, $where = ''): int
+    {
+        $this->deletes[] = ['table' => $table, 'where' => $where];
+        return 1;
+    }
+
+    /**
      * @return list<array<string, mixed>>
      */
     public function fetchAll(string $sql): array
@@ -82,21 +108,23 @@ class FakeConnection
     }
 
     /**
-     * @return array<string, mixed>
+     * @return array<string, mixed>|false
      */
-    public function fetchRow(string $sql): array
+    public function fetchRow(string $sql)
     {
         $this->lastFetchRowSql = $sql;
         $next = array_shift($this->fetchAllResponses);
         if ($next !== null && isset($next[0]) && is_array($next[0])) {
             return $next[0];
         }
-        return [];
+
+        // The real adapter returns false, not an empty row, when nothing matches.
+        return false;
     }
 
     public function fetchOne(string $sql): int
     {
-        return 0;
+        return $this->fetchOneResult;
     }
 
     /**
