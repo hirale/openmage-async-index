@@ -214,6 +214,39 @@ the same state from the database — failed events are
 code, and full-reindex runs live in `hirale_asyncindex_full_run` — or from the
 admin, where the index grid shows which indexers need attention.
 
+### Long full-reindex batches
+
+A full reindex of a product-backed indexer is split into batches of *Full
+Reindex Batch Size*. The rest — `catalog_url`, `catalog_category_flat`,
+`catalog_category_product` — rebuild in one piece: core exposes no checkpoint
+inside `reindexAll()`, so one batch is one message, however long it takes.
+
+Each backend eventually decides a worker has died holding that message:
+
+| Backend | After | What happens |
+| --- | --- | --- |
+| Maho `Maho_Queue` | 300s (`DbTransport::ABANDONED_AFTER_SECONDS`) | Reported abandoned in the admin. Nothing redelivers it; an operator may re-queue it by hand. |
+| OpenMage `hirale/queue` | 3600s (the Symfony Redis transport's `redeliver_timeout`) | Another consumer claims and redelivers it, so the batch can start a second time. |
+
+**Re-running is harmless.** A batch whose run already finished is skipped, and
+while one is still going the index lock makes a second wait rather than run
+alongside it. The cost is wasted work, not a corrupted index. (On several
+servers, set `<global><lock><backend>db</backend></lock></global>` — the default
+file lock is machine-local and cannot serialise across hosts.)
+
+Every batch logs its duration to `var/log/asyncindex.log`, and one that runs
+past *claim timeout minus 60 seconds* logs a forced warning naming the indexer,
+the elapsed time and the catalog size. For reference, `catalog_url` took **75s**
+over 3,220 products and 61,893 rewrites on one store, so a catalog several times
+that size will cross Maho's 300s.
+
+On Maho the fix is `ext-pcntl`: `Maho_Queue`'s worker refreshes its claim every
+few seconds through a `pcntl_alarm`, and without the extension it cannot — the
+usual php-fpm images do not ship it, and `queue:work` says so at startup. With
+it, a long batch stops being reported at all. Note that the refresh is skipped
+while a handler holds a transaction, so it shortens the exposure rather than
+removing it.
+
 ### Failed events are not retried
 
 Core catches an indexer's exception, marks the event failed and returns

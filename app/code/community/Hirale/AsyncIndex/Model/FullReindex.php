@@ -287,7 +287,10 @@ class Hirale_AsyncIndex_Model_FullReindex
             ));
         }
 
+        $startedAt = microtime(true);
         $indexer->reindexEntity($ids);
+        $this->_reportBatchDuration($process, self::MODE_PRODUCT, microtime(true) - $startedAt);
+
         $touched['catalog_product'] = $ids;
         $processed = count($ids);
         $newProcessed = (int) $run['processed'] + $processed;
@@ -308,7 +311,10 @@ class Hirale_AsyncIndex_Model_FullReindex
 
     private function _runGlobalBatch(array $run, Mage_Index_Model_Process $process): int
     {
+        $startedAt = microtime(true);
         $process->reindexEverything();
+        $this->_reportBatchDuration($process, self::MODE_GLOBAL, microtime(true) - $startedAt);
+
         $this->_connection()->update($this->_runTable(), [
             'processed' => 1,
             'updated_at' => $this->_now(),
@@ -316,6 +322,64 @@ class Hirale_AsyncIndex_Model_FullReindex
         $this->_finishRun((int) $run['run_id'], $process, (int) $run['event_waterline']);
 
         return 1;
+    }
+
+    /**
+     * A batch that outlives its backend's claim timeout is the one failure mode
+     * this module cannot design away: an indexer rebuilds in one piece, and
+     * nothing here can checkpoint inside it. So it is reported instead —
+     * silently overrunning is what makes it hard to diagnose.
+     */
+    private function _reportBatchDuration(Mage_Index_Model_Process $process, string $mode, float $seconds): void
+    {
+        $helper = $this->_getHelper();
+        $code = (string) $process->getIndexerCode();
+        $helper->log(sprintf('Full reindex %s batch for "%s" took %.1fs.', $mode, $code, $seconds));
+
+        $warnAt = $helper->getBatchWarnSeconds();
+        if ($warnAt === null || $seconds < $warnAt) {
+            return;
+        }
+
+        $advice = $mode === self::MODE_PRODUCT
+            ? 'Lower Full Reindex Batch Size to shorten each batch.'
+            : 'This indexer rebuilds in one piece, so the module cannot split it further.';
+
+        $helper->log(rtrim(sprintf(
+            'Full reindex %s batch for "%s" took %.1fs%s, past the %ds a worker may hold a message'
+            . ' before the queue acts on the claim. Re-queueing it is a no-op once the run has finished,'
+            . ' so nothing is rebuilt twice. %s %s',
+            $mode,
+            $code,
+            $seconds,
+            $this->_catalogScale(),
+            $warnAt,
+            $helper->getClaimTimeoutNote(),
+            $advice,
+        )), Hirale_AsyncIndex_Helper_Data::LOG_LEVEL_WARNING, force: true);
+    }
+
+    /**
+     * Catalog size, so the reader can judge how far past the threshold this
+     * store already is. One round trip, and only on the warning path.
+     */
+    private function _catalogScale(): string
+    {
+        try {
+            $row = $this->_connection()->fetchRow(sprintf(
+                'SELECT (SELECT COUNT(*) FROM %s) AS products, (SELECT COUNT(*) FROM %s) AS categories',
+                $this->_productTable(),
+                $this->_categoryTable(),
+            ));
+        } catch (Throwable $e) {
+            return '';
+        }
+
+        if (!is_array($row)) {
+            return '';
+        }
+
+        return sprintf(' over %d products and %d categories', (int) $row['products'], (int) $row['categories']);
     }
 
     private function _markRunning(int $runId, Mage_Index_Model_Process $process): void
@@ -524,6 +588,11 @@ class Hirale_AsyncIndex_Model_FullReindex
     private function _productTable(): string
     {
         return Mage::getSingleton('core/resource')->getTableName('catalog/product');
+    }
+
+    private function _categoryTable(): string
+    {
+        return Mage::getSingleton('core/resource')->getTableName('catalog/category');
     }
 
     private function _connection()

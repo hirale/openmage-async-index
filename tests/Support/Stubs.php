@@ -30,6 +30,7 @@ class FakeResource
             'index/event' => 'index_event',
             'index/process' => 'index_process',
             'catalog/product' => 'catalog_product_entity',
+            'catalog/category' => 'catalog_category_entity',
         ];
 
         return $map[$alias] ?? $alias;
