@@ -25,6 +25,19 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     public const LOG_FILE = 'asyncindex.log';
 
     /**
+     * How long a backend lets a worker hold one message before it acts on it.
+     *
+     * Maho: \Maho\Queue\Transport\DbTransport::ABANDONED_AFTER_SECONDS. Track
+     * that constant if core changes it. hirale/queue: the Symfony Redis
+     * transport's redeliver_timeout, which it leaves at the 3600s default.
+     */
+    public const MAHO_CLAIM_TIMEOUT_SECONDS = 300;
+    public const HIRALE_CLAIM_TIMEOUT_SECONDS = 3600;
+
+    /** Warn this far short of the timeout, so the warning arrives before the deadline does. */
+    public const CLAIM_TIMEOUT_MARGIN_SECONDS = 60;
+
+    /**
      * Fired once per drain and once per full-reindex batch, after the index
      * lock is released. Hosts bind an observer here to invalidate whatever
      * they cache on top of the index — nothing else in the async path does,
@@ -244,6 +257,44 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     public static function fullRunDedupeKey(int $runId): string
     {
         return self::FULL_RUN_DEDUPE_PREFIX . $runId;
+    }
+
+    /**
+     * How long one batch may run before its backend acts on the claim. Zero
+     * when there is no queue at all, which means never warn.
+     */
+    public function getClaimTimeoutSeconds(): int
+    {
+        return match ($this->_resolveDispatcher()) {
+            self::DISPATCHER_MAHO => self::MAHO_CLAIM_TIMEOUT_SECONDS,
+            self::DISPATCHER_HIRALE => self::HIRALE_CLAIM_TIMEOUT_SECONDS,
+            default => 0,
+        };
+    }
+
+    /** Null when there is no queue to hold a claim in the first place. */
+    public function getBatchWarnSeconds(): ?int
+    {
+        $timeout = $this->getClaimTimeoutSeconds();
+
+        return $timeout === 0 ? null : max(1, $timeout - self::CLAIM_TIMEOUT_MARGIN_SECONDS);
+    }
+
+    /**
+     * What the backend actually does past that point. The two differ enough
+     * that one sentence would be wrong on one of them: Maho only flags the
+     * message, while hirale/queue hands it to another consumer.
+     */
+    public function getClaimTimeoutNote(): string
+    {
+        return match ($this->_resolveDispatcher()) {
+            self::DISPATCHER_MAHO => 'Maho only reports the message abandoned in the admin and never'
+                . ' redelivers it on its own. Installing ext-pcntl lets the worker keep refreshing its claim,'
+                . ' which avoids the report entirely — it is missing from the usual php-fpm images.',
+            self::DISPATCHER_HIRALE => 'hirale/queue hands the message to another consumer once the'
+                . ' transport\'s redeliver_timeout passes, so the batch can be started a second time.',
+            default => '',
+        };
     }
 
     /**

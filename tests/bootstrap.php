@@ -47,6 +47,8 @@ if (!class_exists('Mage')) {
 
         public static ?Throwable $eventException = null;
 
+        public static ?object $asyncIndexHelper = null;
+
         // No LOG_* constants on purpose: OpenMage declares none, and Maho's are
         // Monolog enum cases rather than ints. A stub that carried int ones
         // would let module code compile here and fatal on both real platforms.
@@ -64,6 +66,7 @@ if (!class_exists('Mage')) {
             self::$events = [];
             self::$app = null;
             self::$eventException = null;
+            self::$asyncIndexHelper = null;
         }
 
         public static function helper(string $alias): object
@@ -72,7 +75,7 @@ if (!class_exists('Mage')) {
                 return self::$helper;
             }
             if ($alias === 'hirale_asyncindex') {
-                return new \Hirale_AsyncIndex_Helper_Data();
+                return self::$asyncIndexHelper ?? new \Hirale_AsyncIndex_Helper_Data();
             }
             if ($alias === 'core') {
                 return new \Mage_Core_Helper_Data();
