@@ -6,6 +6,9 @@ class Hirale_AsyncIndex_Model_Runner
 {
     private const LOCK_NAME = 'hirale_asyncindex_drain';
 
+    /** Rows per prune transaction; see pruneCompletedEvents(). */
+    public const PRUNE_BATCH_SIZE = 5000;
+
     /**
      * @param array<string, mixed> $payload
      * @return array{processed:int, errors:int, pending:bool, locked:bool}
@@ -21,8 +24,9 @@ class Hirale_AsyncIndex_Model_Runner
             return ['processed' => 0, 'errors' => 0, 'pending' => $this->hasPendingEvents(), 'locked' => true];
         }
 
+        $touched = [];
         try {
-            return $helper->withDrainContext(function () use ($helper): array {
+            $result = $helper->withDrainContext(function () use ($helper, &$touched): array {
                 $fullReindex = Mage::getSingleton('hirale_asyncindex/fullReindex');
                 if ($fullReindex instanceof Hirale_AsyncIndex_Model_FullReindex && $fullReindex->hasActiveRuns()) {
                     $fullReindex->enqueueNextActiveRun();
@@ -32,6 +36,7 @@ class Hirale_AsyncIndex_Model_Runner
                 $result = $this->_drainPendingEvents(
                     $helper->getInt('batch_size', 200),
                     $helper->getInt('max_runtime_seconds', 45),
+                    $touched,
                 );
 
                 if ($result['pending'] && $result['processed'] > 0) {
@@ -43,6 +48,23 @@ class Hirale_AsyncIndex_Model_Runner
         } finally {
             $helper->releaseIndexLock(self::LOCK_NAME);
         }
+
+        // Announced outside the lock and outside the drain context: an observer
+        // that saves a model would otherwise re-enter indexing from inside.
+        $helper->notifyReindexed('drain', $touched);
+
+        if ($result['errors'] > 0) {
+            // Nothing retries a failed event: core marks it and
+            // getUnprocessedEventsCollection() only ever selects new ones. This
+            // line is the only signal that the index is drifting.
+            $helper->log(sprintf(
+                'Drain left %d index event(s) failed; they are not retried.'
+                . ' Run "hirale:asyncindex:events" to list them.',
+                $result['errors'],
+            ), Hirale_AsyncIndex_Helper_Data::LOG_LEVEL_WARNING, force: true);
+        }
+
+        return $result;
     }
 
     public function hasPendingEvents(): bool
@@ -56,9 +78,12 @@ class Hirale_AsyncIndex_Model_Runner
     }
 
     /**
+     * @param array<string, list<int>> $touched entity name => ids handed to an
+     *                                          indexer, collected for the
+     *                                          post-drain invalidation event
      * @return array{processed:int, errors:int, pending:bool}
      */
-    private function _drainPendingEvents(int $batchSize, int $maxRuntimeSeconds): array
+    private function _drainPendingEvents(int $batchSize, int $maxRuntimeSeconds, array &$touched): array
     {
         $processed = 0;
         $errors = 0;
@@ -86,6 +111,10 @@ class Hirale_AsyncIndex_Model_Runner
                     try {
                         $process->processEvent($event);
                         $event->save();
+                        $this->_recordTouched($touched, $event);
+                        if ($this->_eventFailed($process, $event)) {
+                            $errors++;
+                        }
                     } catch (Throwable $e) {
                         $errors++;
                         $this->_markEventError($process, $event, $e);
@@ -161,6 +190,38 @@ class Hirale_AsyncIndex_Model_Runner
         $ordered[] = $process;
     }
 
+    /**
+     * Core catches an indexer's exception and records the failure on the event
+     * instead of reporting it, so this is the only way to notice — and it needs
+     * no query, the status is already on the object that was just saved.
+     */
+    private function _eventFailed(Mage_Index_Model_Process $process, Mage_Index_Model_Event $event): bool
+    {
+        $statuses = $event->getProcessIds();
+        if (!is_array($statuses)) {
+            return false;
+        }
+
+        return ($statuses[$process->getId()] ?? null) === Mage_Index_Model_Process::EVENT_STATUS_ERROR;
+    }
+
+    /**
+     * An event with no entity pk named no single record — a mass action, a
+     * store-scope change — and is recorded as id 0, which the helper reads as
+     * "every record of this entity".
+     *
+     * @param array<string, list<int>> $touched
+     */
+    private function _recordTouched(array &$touched, Mage_Index_Model_Event $event): void
+    {
+        $entity = trim((string) $event->getEntity());
+        if ($entity === '') {
+            return;
+        }
+
+        $touched[$entity][] = (int) $event->getEntityPk();
+    }
+
     private function _markEventError(Mage_Index_Model_Process $process, Mage_Index_Model_Event $event, Throwable $e): void
     {
         try {
@@ -171,6 +232,93 @@ class Hirale_AsyncIndex_Model_Runner
         }
 
         $this->_getHelper()->logException($e);
+    }
+
+    /**
+     * Events an indexer failed on. Nothing ever picks them up again — core marks
+     * the row and getUnprocessedEventsCollection() only selects new ones — so
+     * they are invisible without this.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function listFailedEvents(int $limit = 50): array
+    {
+        $resource = Mage::getSingleton('core/resource');
+        $connection = $resource->getConnection('core_read');
+
+        return $connection->fetchAll(sprintf(
+            'SELECT pe.event_id, pe.process_id, p.indexer_code, e.entity, e.entity_pk, e.type, e.created_at'
+            . ' FROM %s pe'
+            . ' INNER JOIN %s p ON p.process_id = pe.process_id'
+            . ' LEFT JOIN %s e ON e.event_id = pe.event_id'
+            . ' WHERE pe.status = %s'
+            . ' ORDER BY pe.event_id DESC LIMIT %d',
+            $resource->getTableName('index/process_event'),
+            $resource->getTableName('index/process'),
+            $resource->getTableName('index/event'),
+            $connection->quote(Mage_Index_Model_Process::EVENT_STATUS_ERROR),
+            max(1, $limit),
+        ));
+    }
+
+    public function countFailedEvents(): int
+    {
+        $resource = Mage::getSingleton('core/resource');
+        $connection = $resource->getConnection('core_read');
+
+        return (int) $connection->fetchOne(sprintf(
+            'SELECT COUNT(*) FROM %s WHERE status = %s',
+            $resource->getTableName('index/process_event'),
+            $connection->quote(Mage_Index_Model_Process::EVENT_STATUS_ERROR),
+        ));
+    }
+
+    /**
+     * Drops rows a finished full reindex marked done before this module learned
+     * to delete them the way core does. Safe at any time: a done row means the
+     * process already handled that event.
+     *
+     * Deleted in batches, each its own transaction, so a store carrying
+     * hundreds of thousands of leftovers does not hold one long lock. Batches
+     * are bounded by event id rather than DELETE ... LIMIT, which only MySQL
+     * has — Maho ships PostgreSQL and SQLite adapters too. A batch can exceed
+     * the size slightly, by the number of processes sharing its last event id.
+     */
+    public function pruneCompletedEvents(int $batchSize = self::PRUNE_BATCH_SIZE): int
+    {
+        $resource = Mage::getSingleton('core/resource');
+        $connection = $resource->getConnection('core_write');
+        $table = $resource->getTableName('index/process_event');
+        $batchSize = max(1, $batchSize);
+        $total = 0;
+
+        while (true) {
+            $eventIds = $connection->fetchCol(sprintf(
+                'SELECT event_id FROM %s WHERE status = %s ORDER BY event_id ASC LIMIT %d',
+                $table,
+                $connection->quote(Mage_Index_Model_Process::EVENT_STATUS_DONE),
+                $batchSize,
+            ));
+            if ($eventIds === []) {
+                return $total;
+            }
+
+            $connection->beginTransaction();
+            try {
+                $total += $connection->delete($table, [
+                    'status = ?' => Mage_Index_Model_Process::EVENT_STATUS_DONE,
+                    'event_id <= ?' => (int) max($eventIds),
+                ]);
+                $connection->commit();
+            } catch (Throwable $e) {
+                $connection->rollBack();
+                throw $e;
+            }
+
+            if (count($eventIds) < $batchSize) {
+                return $total;
+            }
+        }
     }
 
     private function _getPendingEventCount(): int

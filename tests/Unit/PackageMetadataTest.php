@@ -18,8 +18,11 @@ class PackageMetadataTest extends TestCase
 
         self::assertSame('hirale/openmage-async-index', $composer['name']);
         self::assertSame('magento-module', $composer['type']);
-        self::assertArrayHasKey('hirale/queue', $composer['require']);
+        self::assertArrayNotHasKey('hirale/queue', $composer['require']);
         self::assertArrayNotHasKey('mahocommerce/maho', $composer['require']);
+        // OpenMage users pull the queue backend in themselves; Maho dispatches
+        // through core Maho_Queue and must not drag hirale/queue along.
+        self::assertArrayHasKey('hirale/queue', $composer['suggest']);
         self::assertSame('<26.5', $composer['conflict']['mahocommerce/maho']);
         self::assertSame('<20.17', $composer['conflict']['openmage/magento-lts']);
         self::assertContains(
@@ -36,7 +39,7 @@ class PackageMetadataTest extends TestCase
         );
     }
 
-    public function testModuleDeclarationDependsOnIndexAndQueue(): void
+    public function testModuleDeclarationDependsOnIndexOnly(): void
     {
         $xml = simplexml_load_file(__DIR__ . '/../../app/etc/modules/Hirale_AsyncIndex.xml');
 
@@ -44,7 +47,46 @@ class PackageMetadataTest extends TestCase
         self::assertSame('true', (string) $xml->modules->Hirale_AsyncIndex->active);
         self::assertSame('community', (string) $xml->modules->Hirale_AsyncIndex->codePool);
         self::assertTrue(isset($xml->modules->Hirale_AsyncIndex->depends->Mage_Index));
-        self::assertTrue(isset($xml->modules->Hirale_AsyncIndex->depends->Hirale_Queue));
+        // A hard Hirale_Queue dependency aborts config loading on a Maho store,
+        // where the module dispatches through core Maho_Queue instead.
+        self::assertFalse(isset($xml->modules->Hirale_AsyncIndex->depends->Hirale_Queue));
+    }
+
+    public function testConfigRegistersBothQueueBackends(): void
+    {
+        $xml = simplexml_load_file(__DIR__ . '/../../app/code/community/Hirale/AsyncIndex/etc/config.xml');
+
+        self::assertNotFalse($xml);
+        self::assertSame('slow', (string) $xml->global->queue->routing->full_reindex);
+        self::assertSame(
+            'hirale_asyncindex/drainEventsHandler',
+            (string) $xml->global->hirale_queue->handlers->Hirale_AsyncIndex_Message_DrainEventsMessage,
+        );
+        self::assertSame(
+            'hirale_asyncindex/fullReindexBatchHandler',
+            (string) $xml->global->hirale_queue->handlers->Hirale_AsyncIndex_Message_FullReindexBatchMessage,
+        );
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function modulePhpSources(): array
+    {
+        $sources = [];
+        foreach ([
+            __DIR__ . '/../../app/code/community/Hirale/AsyncIndex',
+            __DIR__ . '/../../lib/MahoCLI',
+        ] as $base) {
+            $files = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($base));
+            foreach ($files as $file) {
+                if ($file->isFile() && $file->getExtension() === 'php') {
+                    $sources[$file->getPathname()] = (string) file_get_contents($file->getPathname());
+                }
+            }
+        }
+
+        return $sources;
     }
 
     public function testConfigRewritesIndexerAndProcessWithoutAdminRouterOverride(): void
@@ -69,6 +111,39 @@ class PackageMetadataTest extends TestCase
         self::assertSame('500', (string) $settings->full_batch_size);
     }
 
+    public function testEverySystemXmlSettingIsActuallyReadByTheModule(): void
+    {
+        // A field an operator can set but no code reads is worse than no field:
+        // Max Attempts and Retry Delay used to look like they governed queue
+        // retries, which have always come from the queue backend instead.
+        $xml = simplexml_load_file(__DIR__ . '/../../app/code/community/Hirale/AsyncIndex/etc/system.xml');
+        self::assertNotFalse($xml);
+
+        $sources = implode("\n", $this->modulePhpSources());
+
+        foreach ($xml->sections->hirale_asyncindex->groups->settings->fields->children() as $field => $_) {
+            self::assertStringContainsString(
+                "'" . $field . "'",
+                $sources,
+                sprintf('Setting "%s" is configurable but nothing reads it.', $field),
+            );
+        }
+    }
+
+    public function testModuleNeverReferencesMageLogLevelConstants(): void
+    {
+        // OpenMage declares no Mage::LOG_* constants at all, and on Maho they
+        // are Monolog enum cases, not ints. Either way a reference here fatals
+        // on a real store, and a test stub carrying int ones would hide it.
+        foreach ($this->modulePhpSources() as $path => $source) {
+            self::assertStringNotContainsString(
+                'Mage::LOG_',
+                $source,
+                sprintf('%s uses a Mage log-level constant; use the module\'s own instead.', $path),
+            );
+        }
+    }
+
     public function testEnabledBackendWarnsWhenQueueIsDisabled(): void
     {
         $backend = file_get_contents(
@@ -78,6 +153,6 @@ class PackageMetadataTest extends TestCase
         self::assertIsString($backend);
         self::assertStringContainsString('isQueueEnabled()', $backend);
         self::assertStringContainsString('addWarning', $backend);
-        self::assertStringContainsString('Hirale Queue is unavailable', $backend);
+        self::assertStringContainsString('no message queue backend is available', $backend);
     }
 }
