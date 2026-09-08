@@ -207,6 +207,13 @@ in full; invalidating whatever you derive from them is the host's job.
 ./maho hirale:asyncindex:events --prune-done  # also drop leftover completed rows
 ```
 
+**These three commands are Maho only.** They are registered through
+`lib/MahoCLI/Commands/`, which OpenMage has no equivalent of. On OpenMage, read
+the same state from the database — failed events are
+`index_process_event.status = 'error'` joined to `index_process` for the indexer
+code, and full-reindex runs live in `hirale_asyncindex_full_run` — or from the
+admin, where the index grid shows which indexers need attention.
+
 ### Failed events are not retried
 
 Core catches an indexer's exception, marks the event failed and returns
@@ -228,7 +235,9 @@ does not own. Until then, failing loudly beats failing in a loop.
 
 `--prune-done` exists for one migration: full reindex runs before 2.0.0 marked
 their event rows done instead of deleting them, and nothing ever removed a done
-row. New runs delete as they go, and this clears what the old ones left.
+row. New runs delete as they go, and this clears what the old ones left. It
+deletes in batches of `--prune-batch` (5000), each its own transaction, so a
+store carrying a large backlog is not cleared under one long-held lock.
 
 ## Runtime
 

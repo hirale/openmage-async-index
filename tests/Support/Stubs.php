@@ -47,18 +47,24 @@ class FakeConnection
     /** @var list<array{table:string,values:array<string, mixed>,fields:list<string>}> */
     public array $upserts = [];
 
-    /** @var list<array{table:string,where:mixed}> */
+    /** @var list<array{table:string,where:mixed,transaction_depth:int}> */
     public array $deletes = [];
 
     /** @var list<list<array<string, mixed>>> */
     public array $fetchAllResponses = [];
 
     public string $lastFetchAllSql = '';
+    public string $lastFetchColSql = '';
     public string $lastFetchRowSql = '';
     public int $updateResult = 0;
     public int $fetchOneResult = 0;
     /** @var list<int> */
     public array $fetchColResult = [];
+    /** @var list<list<int>> */
+    public array $fetchColResponses = [];
+    /** @var list<int> */
+    public array $deleteResults = [];
+    public int $deleteResult = 1;
     public int $insertId = 0;
     public int $transactionDepth = 0;
 
@@ -96,8 +102,13 @@ class FakeConnection
      */
     public function delete(string $table, $where = ''): int
     {
-        $this->deletes[] = ['table' => $table, 'where' => $where];
-        return 1;
+        $this->deletes[] = [
+            'table' => $table,
+            'where' => $where,
+            'transaction_depth' => $this->transactionDepth,
+        ];
+
+        return array_shift($this->deleteResults) ?? $this->deleteResult;
     }
 
     /**
@@ -135,6 +146,11 @@ class FakeConnection
      */
     public function fetchCol(string $sql): array
     {
+        $this->lastFetchColSql = $sql;
+        if ($this->fetchColResponses !== []) {
+            return array_shift($this->fetchColResponses);
+        }
+
         return $this->fetchColResult;
     }
 

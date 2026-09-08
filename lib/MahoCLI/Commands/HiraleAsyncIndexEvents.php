@@ -29,6 +29,13 @@ class HiraleAsyncIndexEvents extends BaseMahoCommand
             InputOption::VALUE_NONE,
             'Also delete leftover rows marked done by full reindex runs from before this module deleted them',
         );
+        $this->addOption(
+            'prune-batch',
+            null,
+            InputOption::VALUE_REQUIRED,
+            'Rows per prune transaction',
+            (string) Hirale_AsyncIndex_Model_Runner::PRUNE_BATCH_SIZE,
+        );
     }
 
     #[\Override]
@@ -45,7 +52,7 @@ class HiraleAsyncIndexEvents extends BaseMahoCommand
         if ($input->getOption('prune-done')) {
             $output->writeln(sprintf(
                 '<info>Removed %d leftover completed event row(s).</info>',
-                $runner->pruneCompletedEvents(),
+                $runner->pruneCompletedEvents((int) $input->getOption('prune-batch')),
             ));
         }
 

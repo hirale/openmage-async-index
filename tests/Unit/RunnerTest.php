@@ -156,18 +156,43 @@ class RunnerTest extends TestCase
         self::assertStringContainsString('index_event', $resource->connection->lastFetchAllSql);
     }
 
-    public function testCompletedEventRowsCanBePruned(): void
+    public function testCompletedEventRowsArePrunedInTransactionalBatches(): void
+    {
+        // A store carrying hundreds of thousands of leftovers must not be
+        // cleared in one long-held lock.
+        $resource = $this->bootstrap();
+        $resource->connection->fetchColResponses = [[1, 2], [3]];
+        $resource->connection->deleteResults = [2, 1];
+
+        $removed = (new \Hirale_AsyncIndex_Model_Runner())->pruneCompletedEvents(2);
+
+        self::assertSame(3, $removed);
+        self::assertCount(2, $resource->connection->deletes);
+
+        foreach ($resource->connection->deletes as $delete) {
+            self::assertSame('index_process_event', $delete['table']);
+            self::assertSame(
+                \Mage_Index_Model_Process::EVENT_STATUS_DONE,
+                $delete['where']['status = ?'],
+            );
+            // Each batch commits on its own.
+            self::assertSame(1, $delete['transaction_depth']);
+        }
+
+        // Bounded by the batch's highest event id, not DELETE ... LIMIT, which
+        // only MySQL has.
+        self::assertSame(2, $resource->connection->deletes[0]['where']['event_id <= ?']);
+        self::assertSame(3, $resource->connection->deletes[1]['where']['event_id <= ?']);
+        self::assertSame(0, $resource->connection->transactionDepth);
+    }
+
+    public function testPruningStopsWhenThereIsNothingLeft(): void
     {
         $resource = $this->bootstrap();
+        $resource->connection->fetchColResponses = [[]];
 
-        (new \Hirale_AsyncIndex_Model_Runner())->pruneCompletedEvents();
-
-        self::assertCount(1, $resource->connection->deletes);
-        self::assertSame('index_process_event', $resource->connection->deletes[0]['table']);
-        self::assertSame(
-            \Mage_Index_Model_Process::EVENT_STATUS_DONE,
-            $resource->connection->deletes[0]['where']['status = ?'],
-        );
+        self::assertSame(0, (new \Hirale_AsyncIndex_Model_Runner())->pruneCompletedEvents(2));
+        self::assertSame([], $resource->connection->deletes);
     }
 
     public function testAnEventWhoseIndexerThrewPastCoreIsNotAnnouncedAsTouched(): void

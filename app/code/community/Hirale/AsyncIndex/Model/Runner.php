@@ -6,6 +6,9 @@ class Hirale_AsyncIndex_Model_Runner
 {
     private const LOCK_NAME = 'hirale_asyncindex_drain';
 
+    /** Rows per prune transaction; see pruneCompletedEvents(). */
+    public const PRUNE_BATCH_SIZE = 5000;
+
     /**
      * @param array<string, mixed> $payload
      * @return array{processed:int, errors:int, pending:bool, locked:bool}
@@ -274,15 +277,48 @@ class Hirale_AsyncIndex_Model_Runner
      * Drops rows a finished full reindex marked done before this module learned
      * to delete them the way core does. Safe at any time: a done row means the
      * process already handled that event.
+     *
+     * Deleted in batches, each its own transaction, so a store carrying
+     * hundreds of thousands of leftovers does not hold one long lock. Batches
+     * are bounded by event id rather than DELETE ... LIMIT, which only MySQL
+     * has — Maho ships PostgreSQL and SQLite adapters too. A batch can exceed
+     * the size slightly, by the number of processes sharing its last event id.
      */
-    public function pruneCompletedEvents(): int
+    public function pruneCompletedEvents(int $batchSize = self::PRUNE_BATCH_SIZE): int
     {
         $resource = Mage::getSingleton('core/resource');
+        $connection = $resource->getConnection('core_write');
+        $table = $resource->getTableName('index/process_event');
+        $batchSize = max(1, $batchSize);
+        $total = 0;
 
-        return $resource->getConnection('core_write')->delete(
-            $resource->getTableName('index/process_event'),
-            ['status = ?' => Mage_Index_Model_Process::EVENT_STATUS_DONE],
-        );
+        while (true) {
+            $eventIds = $connection->fetchCol(sprintf(
+                'SELECT event_id FROM %s WHERE status = %s ORDER BY event_id ASC LIMIT %d',
+                $table,
+                $connection->quote(Mage_Index_Model_Process::EVENT_STATUS_DONE),
+                $batchSize,
+            ));
+            if ($eventIds === []) {
+                return $total;
+            }
+
+            $connection->beginTransaction();
+            try {
+                $total += $connection->delete($table, [
+                    'status = ?' => Mage_Index_Model_Process::EVENT_STATUS_DONE,
+                    'event_id <= ?' => (int) max($eventIds),
+                ]);
+                $connection->commit();
+            } catch (Throwable $e) {
+                $connection->rollBack();
+                throw $e;
+            }
+
+            if (count($eventIds) < $batchSize) {
+                return $total;
+            }
+        }
     }
 
     private function _getPendingEventCount(): int
