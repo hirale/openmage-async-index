@@ -77,7 +77,7 @@ class HelperDataTest extends TestCase
         self::assertSame([], QueueManager::$dispatches);
     }
 
-    public function testMahoDrainDispatchCarriesTheDedupeKeyOnTheDefaultQueue(): void
+    public function testMahoDrainDispatchCarriesTheDedupeKeyOnItsOwnQueue(): void
     {
         \Mage::$enabledModules['Maho_Queue'] = true;
         \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
@@ -90,7 +90,9 @@ class HelperDataTest extends TestCase
         ));
 
         $call = QueueManager::$dispatches[0];
-        self::assertSame('default', $call['queue']);
+        // Not core's shared "default": no module may reroute that one, so a host
+        // could never move drain to a resident pool.
+        self::assertSame(\Hirale_AsyncIndex_Helper_Data::QUEUE_DRAIN, $call['queue']);
         self::assertSame(\Hirale_AsyncIndex_Helper_Data::DRAIN_DEDUPE_KEY, $call['dedupeKey']);
         self::assertNull($call['delaySeconds']);
         self::assertSame([], $call['stamps']);
@@ -123,7 +125,7 @@ class HelperDataTest extends TestCase
         self::assertFalse($stamp->enforce);
     }
 
-    public function testMahoFullReindexBatchUsesItsOwnQueueAndCarriesNoDedupeKey(): void
+    public function testMahoFullReindexBatchUsesItsOwnQueueAndAPerRunDedupeKey(): void
     {
         \Mage::$enabledModules['Maho_Queue'] = true;
         \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
@@ -133,8 +135,52 @@ class HelperDataTest extends TestCase
         $call = QueueManager::$dispatches[0];
         self::assertSame(\Hirale_AsyncIndex_Helper_Data::QUEUE_FULL_REINDEX, $call['queue']);
         self::assertSame(30, $call['delaySeconds']);
-        self::assertNull($call['dedupeKey']);
+        self::assertSame('hirale_asyncindex_full_run_7', $call['dedupeKey']);
+        self::assertSame([], $call['stamps']);
         self::assertSame(7, $call['message']->runId);
+    }
+
+    public function testFullRunDedupeKeysAreDistinctPerRun(): void
+    {
+        // Runs must never suppress each other: the reconciler enqueues the
+        // active run once a minute while its own batch chain keeps going.
+        self::assertNotSame(
+            \Hirale_AsyncIndex_Helper_Data::fullRunDedupeKey(7),
+            \Hirale_AsyncIndex_Helper_Data::fullRunDedupeKey(8),
+        );
+    }
+
+    public function testMahoFullReindexContinuationKeepsTheRunKeyWithoutEnforcingIt(): void
+    {
+        \Mage::$enabledModules['Maho_Queue'] = true;
+        \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
+
+        self::assertTrue(
+            (new \Hirale_AsyncIndex_Helper_Data())->enqueueFullReindexBatch(7, 0, continuation: true),
+        );
+
+        $call = QueueManager::$dispatches[0];
+        self::assertNull($call['dedupeKey']);
+        self::assertCount(1, $call['stamps']);
+
+        $stamp = $call['stamps'][0];
+        self::assertInstanceOf(DedupeKeyStamp::class, $stamp);
+        self::assertSame('hirale_asyncindex_full_run_7', $stamp->key);
+        self::assertFalse($stamp->enforce);
+    }
+
+    public function testMahoDrainCanBeDispatchedWithoutAnyDedupeKey(): void
+    {
+        // The reconciler's recovery dispatch: an enforced key would be
+        // swallowed by the processing row of the worker that just died.
+        \Mage::$enabledModules['Maho_Queue'] = true;
+        \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
+
+        self::assertTrue((new \Hirale_AsyncIndex_Helper_Data())->enqueueDrain('reconciler', dedupe: false));
+
+        $call = QueueManager::$dispatches[0];
+        self::assertNull($call['dedupeKey']);
+        self::assertSame([], $call['stamps']);
     }
 
     public function testMahoFullReindexBatchHonoursTheConfiguredQueueOverride(): void

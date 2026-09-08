@@ -132,9 +132,15 @@ class Hirale_AsyncIndex_Model_FullReindex
         return $this->_loadNextActiveRun() !== null;
     }
 
-    public function enqueueRun(int $runId, int $delay = 0): bool
+    /**
+     * @param bool $continuation true when this run's own handler is enqueueing
+     *                           the next batch; its row is still processing
+     *                           under the run's dedupe key and would otherwise
+     *                           swallow the continuation
+     */
+    public function enqueueRun(int $runId, int $delay = 0, bool $continuation = false): bool
     {
-        return $this->_getHelper()->enqueueFullReindexBatch($runId, $delay);
+        return $this->_getHelper()->enqueueFullReindexBatch($runId, $delay, $continuation);
     }
 
     /**
@@ -148,7 +154,7 @@ class Hirale_AsyncIndex_Model_FullReindex
         }
 
         if (!$helper->acquireIndexLock(self::LOCK_NAME)) {
-            $this->enqueueRun($runId, 15);
+            $this->enqueueRun($runId, 15, continuation: true);
             return ['processed' => 0, 'pending' => true, 'locked' => true];
         }
 
@@ -226,7 +232,7 @@ class Hirale_AsyncIndex_Model_FullReindex
 
             $updatedRun = $this->_loadRun($runId);
             if ($updatedRun !== null && $updatedRun['status'] === self::STATUS_RUNNING) {
-                $this->enqueueRun($runId);
+                $this->enqueueRun($runId, continuation: true);
                 return ['processed' => $processed, 'pending' => true, 'locked' => false];
             }
 
@@ -297,7 +303,7 @@ class Hirale_AsyncIndex_Model_FullReindex
 
     private function _finishRun(int $runId, Mage_Index_Model_Process $process, int $eventWaterline): void
     {
-        $this->_markProcessEventsDone((int) $process->getId(), $eventWaterline);
+        $this->_clearProcessEvents((int) $process->getId(), $eventWaterline);
         $process->getResource()->endProcess($process);
         $this->_connection()->update($this->_runTable(), [
             'status' => self::STATUS_SUCCEEDED,
@@ -338,18 +344,32 @@ class Hirale_AsyncIndex_Model_FullReindex
         ], ['run_id = ?' => $runId]);
     }
 
-    private function _markProcessEventsDone(int $processId, int $eventWaterline): void
+    /**
+     * Core signals "this process is done with this event" by deleting the
+     * index_process_event row (Mage_Index_Model_Resource_Event::_afterSave), so
+     * this deletes too. Marking the rows done instead left them behind forever:
+     * nothing else ever removes a done row, and every finished run added a new
+     * batch of them.
+     *
+     * The second delete sweeps done rows left by earlier versions of this
+     * method. They are safe to drop at any waterline — a done row means the
+     * process already handled that event.
+     */
+    private function _clearProcessEvents(int $processId, int $eventWaterline): void
     {
-        if ($eventWaterline <= 0) {
-            return;
+        $connection = $this->_connection();
+        $table = $this->_processEventTable();
+
+        if ($eventWaterline > 0) {
+            $connection->delete($table, [
+                'process_id = ?' => $processId,
+                'event_id <= ?' => $eventWaterline,
+            ]);
         }
 
-        $this->_connection()->update($this->_processEventTable(), [
-            'status' => Mage_Index_Model_Process::EVENT_STATUS_DONE,
-        ], [
+        $connection->delete($table, [
             'process_id = ?' => $processId,
-            'event_id <= ?' => $eventWaterline,
-            'status <> ?' => Mage_Index_Model_Process::EVENT_STATUS_DONE,
+            'status = ?' => Mage_Index_Model_Process::EVENT_STATUS_DONE,
         ]);
     }
 

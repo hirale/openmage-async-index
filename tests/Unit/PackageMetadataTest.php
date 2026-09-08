@@ -90,6 +90,32 @@ class PackageMetadataTest extends TestCase
         self::assertSame('500', (string) $settings->full_batch_size);
     }
 
+    public function testEverySystemXmlSettingIsActuallyReadByTheModule(): void
+    {
+        // A field an operator can set but no code reads is worse than no field:
+        // Max Attempts and Retry Delay used to look like they governed queue
+        // retries, which have always come from the queue backend instead.
+        $xml = simplexml_load_file(__DIR__ . '/../../app/code/community/Hirale/AsyncIndex/etc/system.xml');
+        self::assertNotFalse($xml);
+
+        $sources = '';
+        $base = __DIR__ . '/../../app/code/community/Hirale/AsyncIndex';
+        $files = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($base));
+        foreach ($files as $file) {
+            if ($file->isFile() && $file->getExtension() === 'php') {
+                $sources .= (string) file_get_contents($file->getPathname());
+            }
+        }
+
+        foreach ($xml->sections->hirale_asyncindex->groups->settings->fields->children() as $field => $_) {
+            self::assertStringContainsString(
+                "'" . $field . "'",
+                $sources,
+                sprintf('Setting "%s" is configurable but nothing reads it.', $field),
+            );
+        }
+    }
+
     public function testEnabledBackendWarnsWhenQueueIsDisabled(): void
     {
         $backend = file_get_contents(

@@ -4,6 +4,13 @@ declare(strict_types=1);
 
 class Hirale_AsyncIndex_Model_ModeManager
 {
+    /**
+     * Managed modes follow the main switch: while async index is on, manual
+     * indexers are taken over so events keep being recorded; when it is turned
+     * off, the modes are handed back — unless the operator asked to keep them,
+     * in which case the indexers stay on real_time and the state table is left
+     * as it is, so a later re-enable still knows what to restore.
+     */
     public function sync(): void
     {
         $helper = $this->_getHelper();
@@ -19,26 +26,43 @@ class Hirale_AsyncIndex_Model_ModeManager
         }
     }
 
+    /**
+     * Takes over every manual indexer, recording the mode being taken over at
+     * that moment. Recording it the first time a process was merely *seen*
+     * stored the wrong mode: an indexer the operator switched to manual later
+     * was taken over anyway, but the state row still claimed its original mode
+     * was whatever it had been before, so disabling async index restored that
+     * instead of the operator's choice.
+     *
+     * A process the operator switches back to manual while async index runs is
+     * taken over again — real_time is what makes events land in the first place
+     * — and the log line says so, since the change silently not sticking is
+     * otherwise indistinguishable from a bug.
+     */
     public function normalizeManagedModes(): void
     {
         foreach ($this->_getProcesses() as $process) {
             $processId = (int) $process->getId();
-            if ($processId <= 0) {
+            if ($processId <= 0 || $process->getMode() !== Mage_Index_Model_Process::MODE_MANUAL) {
                 continue;
             }
 
-            $state = $this->_loadState($processId);
-            if ($state === null) {
-                $this->_insertState($process);
-            }
+            $this->_recordTakeover($process);
+            $process->setMode(Mage_Index_Model_Process::MODE_REAL_TIME)->save();
 
-            if ($process->getMode() === Mage_Index_Model_Process::MODE_MANUAL) {
-                $process->setMode(Mage_Index_Model_Process::MODE_REAL_TIME)->save();
-                $this->_markManaged($processId, Mage_Index_Model_Process::MODE_REAL_TIME);
-            }
+            $this->_getHelper()->log(sprintf(
+                'Took indexer "%s" from manual to real_time so index events are recorded;'
+                . ' the manual mode is restored when async index is disabled.',
+                (string) $process->getIndexerCode(),
+            ), Mage::LOG_NOTICE);
         }
     }
 
+    /**
+     * Hands every taken-over indexer back to the mode it had at takeover, then
+     * clears the table — including rows written by older versions, which
+     * recorded every process rather than only the ones actually taken over.
+     */
     public function restoreManagedModes(): void
     {
         foreach ($this->_loadManagedStates() as $state) {
@@ -75,20 +99,6 @@ class Hirale_AsyncIndex_Model_ModeManager
     }
 
     /**
-     * @return array<string, mixed>|null
-     */
-    private function _loadState(int $processId): ?array
-    {
-        $row = $this->_connection()->fetchRow(sprintf(
-            'SELECT * FROM %s WHERE process_id = %d',
-            $this->_stateTable(),
-            $processId,
-        ));
-
-        return is_array($row) ? $row : null;
-    }
-
-    /**
      * @return list<array<string, mixed>>
      */
     private function _loadManagedStates(): array
@@ -99,27 +109,22 @@ class Hirale_AsyncIndex_Model_ModeManager
         ));
     }
 
-    private function _insertState(Mage_Index_Model_Process $process): void
+    /**
+     * Upsert on the unique process_id index: one write instead of a select and
+     * a branch, and it re-takes a process whose row survived an earlier run.
+     */
+    private function _recordTakeover(Mage_Index_Model_Process $process): void
     {
         $now = $this->_now();
-        $this->_connection()->insert($this->_stateTable(), [
+        $this->_connection()->insertOnDuplicate($this->_stateTable(), [
             'process_id' => (int) $process->getId(),
             'indexer_code' => (string) $process->getIndexerCode(),
             'original_mode' => (string) $process->getMode(),
-            'managed_mode' => null,
-            'is_managed' => 0,
+            'managed_mode' => Mage_Index_Model_Process::MODE_REAL_TIME,
+            'is_managed' => 1,
             'created_at' => $now,
             'updated_at' => $now,
-        ]);
-    }
-
-    private function _markManaged(int $processId, string $managedMode): void
-    {
-        $this->_connection()->update($this->_stateTable(), [
-            'managed_mode' => $managedMode,
-            'is_managed' => 1,
-            'updated_at' => $this->_now(),
-        ], ['process_id = ?' => $processId]);
+        ], ['indexer_code', 'original_mode', 'managed_mode', 'is_managed', 'updated_at']);
     }
 
     private function _stateTable(): string

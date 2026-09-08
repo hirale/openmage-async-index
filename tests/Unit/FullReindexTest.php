@@ -113,4 +113,59 @@ class FullReindexTest extends TestCase
         self::assertSame('dispatchDelayed', Bus::$dispatches[0]['method']);
         self::assertSame(15, Bus::$dispatches[0]['delaySeconds']);
     }
+
+    public function testFinishedRunDeletesItsProcessEventsInsteadOfMarkingThemDone(): void
+    {
+        // Core signals "handled" by deleting the index_process_event row, so a
+        // row marked done was never removed by anything: every finished run used
+        // to leave a fresh batch of them behind for good.
+        \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
+        \Mage::$singletons['core/lock'] = new \Mage_Core_Model_Lock();
+
+        $resource = new FakeResource();
+        $resource->connection->updateResult = 1;
+        $resource->connection->fetchAllResponses = [
+            [[
+                'run_id' => 9,
+                'process_id' => 3,
+                'indexer_code' => 'catalog_url',
+                'mode' => 'global',
+                'status' => 'queued',
+                'cursor_value' => 0,
+                'total' => 1,
+                'processed' => 0,
+                'event_waterline' => 120,
+                'cancel_requested' => 0,
+            ]],
+            [['run_id' => 9, 'status' => 'succeeded']],
+        ];
+        \Mage::$singletons['core/resource'] = $resource;
+
+        $process = new \Mage_Index_Model_Process(id: 3, indexerCode: 'catalog_url');
+        \Mage::$processes[3] = $process;
+
+        $result = (new \Hirale_AsyncIndex_Model_FullReindex())->runBatch(9);
+
+        self::assertSame(1, $result['processed']);
+        self::assertSame(1, $process->reindexEverythingCalls);
+        self::assertSame(['start', 'end'], $process->resource->calls);
+
+        $deletes = $resource->connection->deletes;
+        self::assertCount(2, $deletes);
+        self::assertSame('index_process_event', $deletes[0]['table']);
+        self::assertSame(3, $deletes[0]['where']['process_id = ?']);
+        self::assertSame(120, $deletes[0]['where']['event_id <= ?']);
+
+        // Second sweep clears rows left behind by earlier versions, whatever
+        // their event id.
+        self::assertSame('index_process_event', $deletes[1]['table']);
+        self::assertSame(3, $deletes[1]['where']['process_id = ?']);
+        self::assertSame(
+            \Mage_Index_Model_Process::EVENT_STATUS_DONE,
+            $deletes[1]['where']['status = ?'],
+        );
+
+        $runUpdates = array_column($resource->connection->updates, 'values');
+        self::assertSame('succeeded', end($runUpdates)['status']);
+    }
 }

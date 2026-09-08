@@ -82,38 +82,6 @@
                             <show_in_website>0</show_in_website>
                             <show_in_store>0</show_in_store>
                         </max_runtime_seconds>
-                        <full_max_runtime_seconds translate="label" module="hirale_asyncindex">
-                            <label>Full Reindex Max Runtime Seconds</label>
-                            <frontend_type>text</frontend_type>
-                            <sort_order>35</sort_order>
-                            <show_in_default>1</show_in_default>
-                            <show_in_website>0</show_in_website>
-                            <show_in_store>0</show_in_store>
-                        </full_max_runtime_seconds>
-                        <max_attempts translate="label" module="hirale_asyncindex">
-                            <label>Max Attempts</label>
-                            <frontend_type>text</frontend_type>
-                            <sort_order>50</sort_order>
-                            <show_in_default>1</show_in_default>
-                            <show_in_website>0</show_in_website>
-                            <show_in_store>0</show_in_store>
-                        </max_attempts>
-                        <retry_delay translate="label" module="hirale_asyncindex">
-                            <label>Retry Delay Seconds</label>
-                            <frontend_type>text</frontend_type>
-                            <sort_order>60</sort_order>
-                            <show_in_default>1</show_in_default>
-                            <show_in_website>0</show_in_website>
-                            <show_in_store>0</show_in_store>
-                        </retry_delay>
-                        <coalesce_ttl_seconds translate="label" module="hirale_asyncindex">
-                            <label>Coalesce TTL Seconds</label>
-                            <frontend_type>text</frontend_type>
-                            <sort_order>70</sort_order>
-                            <show_in_default>1</show_in_default>
-                            <show_in_website>0</show_in_website>
-                            <show_in_store>0</show_in_store>
-                        </coalesce_ttl_seconds>
                     </fields>
                 </settings>
             </groups>

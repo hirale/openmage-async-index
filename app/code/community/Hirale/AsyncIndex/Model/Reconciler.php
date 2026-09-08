@@ -27,7 +27,9 @@ class Hirale_AsyncIndex_Model_Reconciler
             return;
         }
 
-        $helper->enqueueDrain(reason: 'reconciler');
+        // No dedupe key: this is the recovery path for a worker killed mid-drain,
+        // whose row stays processing until the queue calls the claim abandoned.
+        $helper->enqueueDrain(reason: 'reconciler', dedupe: false);
     }
 
     private function _getRunner(): Hirale_AsyncIndex_Model_Runner

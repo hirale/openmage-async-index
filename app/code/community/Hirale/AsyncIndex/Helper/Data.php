@@ -15,6 +15,15 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     /** Suppresses a second drain while one is pending or processing. Maho only — hirale/queue v3 has no dispatch-time dedup. */
     public const DRAIN_DEDUPE_KEY = 'hirale_asyncindex_drain';
 
+    /** Per-run prefix: batches of different runs must never suppress each other. */
+    public const FULL_RUN_DEDUPE_PREFIX = 'hirale_asyncindex_full_run_';
+
+    /** Queue drain messages land on, so a host can route them without moving core's shared default queue. */
+    public const QUEUE_DRAIN = 'index_drain';
+
+    /** Keeps async index noise out of system.log on both platforms. */
+    public const LOG_FILE = 'asyncindex.log';
+
     /** Queue full-reindex batches land on when no override is configured; config.xml routes it off the fast pool. */
     public const QUEUE_FULL_REINDEX = 'full_reindex';
 
@@ -125,12 +134,20 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
      * Multiple drains over an already-empty event table are idempotent
      * (Runner::drain returns immediately when no work is found), so the
      * dedupe key is an optimisation, not a correctness requirement.
+     *
+     * @param bool $dedupe false dispatches without a key at all. The reconciler
+     *                     needs that: a worker killed mid-drain leaves its row
+     *                     processing for the five minutes it takes the queue to
+     *                     call the claim abandoned, and an enforced key would
+     *                     suppress the very dispatch meant to recover from it.
+     *                     Its own once-a-minute schedule is the rate limit.
      */
     public function enqueueDrain(
         string $reason,
         ?int $eventId = null,
         ?string $entity = null,
         ?string $type = null,
+        bool $dedupe = true,
     ): bool {
         if (!$this->isEnabled()) {
             return false;
@@ -150,7 +167,8 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
                     entity: $entity,
                     type: $type,
                 ),
-                dedupeKey: self::DRAIN_DEDUPE_KEY,
+                $this->_drainQueue($dispatcher),
+                dedupeKey: $dedupe ? self::DRAIN_DEDUPE_KEY : null,
                 enforceDedupe: !$this->isDrainContext(),
             );
             return true;
@@ -161,10 +179,13 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     }
 
     /**
-     * Dispatch a full-reindex batch message. Batches of different runs must
-     * never suppress each other, so these carry no dedupe key.
+     * Dispatch a full-reindex batch message. The key is per run, so batches of
+     * different runs never suppress each other while the once-a-minute
+     * reconciler and the batch chain both keep enqueueing the active one.
+     *
+     * @param bool $continuation true when the handler is continuing its own run
      */
-    public function enqueueFullReindexBatch(int $runId, int $delaySeconds = 0): bool
+    public function enqueueFullReindexBatch(int $runId, int $delaySeconds = 0, bool $continuation = false): bool
     {
         if (!$this->isEnabled()) {
             return false;
@@ -181,12 +202,19 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
                 new Hirale_AsyncIndex_Message_FullReindexBatchMessage($runId),
                 $this->_fullReindexQueue($dispatcher),
                 $delaySeconds,
+                self::fullRunDedupeKey($runId),
+                !$continuation,
             );
             return true;
         } catch (Throwable $e) {
             $this->logException($e);
             return false;
         }
+    }
+
+    public static function fullRunDedupeKey(int $runId): string
+    {
+        return self::FULL_RUN_DEDUPE_PREFIX . $runId;
     }
 
     /**
@@ -222,6 +250,18 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     protected function _isHiraleQueueAvailable(): bool
     {
         return class_exists(Bus::class);
+    }
+
+    /**
+     * Queue drain messages ride. On Maho they get a name of their own so a host
+     * can route them to a resident pool without touching core's shared default
+     * queue, which no module may reroute. config.xml leaves it unrouted, so it
+     * still falls to the catch-all pool. hirale/queue only knows admin-declared
+     * queues, so OpenMage keeps using that module's own routing.
+     */
+    private function _drainQueue(string $dispatcher): ?string
+    {
+        return $dispatcher === self::DISPATCHER_MAHO ? self::QUEUE_DRAIN : null;
     }
 
     /**
@@ -321,6 +361,11 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
         }
 
         return $lock;
+    }
+
+    public function log(string $message, int $level = Mage::LOG_INFO): void
+    {
+        Mage::log($message, $level, self::LOG_FILE);
     }
 
     public function logException(Throwable $e): void
