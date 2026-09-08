@@ -216,8 +216,9 @@ retried, not counted as pending, and invisible in the admin. The index silently
 drifts.
 
 `hirale:asyncindex:events` is that missing view, and a drain that leaves
-failures behind writes a warning to `var/log/asyncindex.log`. To clear them,
-reindex the affected indexer.
+failures behind writes a warning to `var/log/asyncindex.log` — forced, so it
+appears even on a store with `dev/log/active` off, since there is no other
+channel for it. To clear them, reindex the affected indexer.
 
 There is deliberately no automatic retry. An event fails because its indexer
 threw, and the input that made it throw is stored in the event row — retrying on

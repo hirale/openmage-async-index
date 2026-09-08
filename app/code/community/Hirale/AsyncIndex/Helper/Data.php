@@ -516,9 +516,15 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
         return $lock;
     }
 
-    public function log(string $message, int $level = self::LOG_LEVEL_INFO): void
+    /**
+     * @param bool $force write even where the store has logging switched off.
+     *                    Reserved for faults that have no other channel — the
+     *                    module writes to its own file, so this never lands in
+     *                    system.log.
+     */
+    public function log(string $message, int $level = self::LOG_LEVEL_INFO, bool $force = false): void
     {
-        Mage::log($message, $level, self::LOG_FILE);
+        Mage::log($message, $level, self::LOG_FILE, $force);
     }
 
     public function logException(Throwable $e): void

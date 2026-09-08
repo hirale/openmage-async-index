@@ -72,6 +72,9 @@ class ModeManagerTest extends TestCase
         self::assertStringContainsString('catalog_product_price', \Mage::$logs[0]['message']);
         self::assertSame(\Hirale_AsyncIndex_Helper_Data::LOG_FILE, \Mage::$logs[0]['file']);
         self::assertSame(\Hirale_AsyncIndex_Helper_Data::LOG_LEVEL_NOTICE, \Mage::$logs[0]['level']);
+        // Not forced: the reverted mode is visible in the admin anyway, so this
+        // respects a store that turned logging off.
+        self::assertFalse(\Mage::$logs[0]['force']);
     }
 
     public function testProcessesAlreadyOnRealTimeCostNoQueriesAtAll(): void

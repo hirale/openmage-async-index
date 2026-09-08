@@ -37,7 +37,7 @@ if (!class_exists('Mage')) {
         /** @var array<int, Mage_Index_Model_Process> */
         public static array $processes = [];
 
-        /** @var list<array{message:string,level:int,file:?string}> */
+        /** @var list<array{message:string,level:int,file:?string,force:bool}> */
         public static array $logs = [];
 
         /** @var list<array{name:string,data:array<string, mixed>}> */
@@ -131,9 +131,18 @@ if (!class_exists('Mage')) {
         {
         }
 
-        public static function log(string $message, ?int $level = null, ?string $file = null): void
-        {
-            self::$logs[] = ['message' => $message, 'level' => (int) $level, 'file' => $file];
+        public static function log(
+            string $message,
+            ?int $level = null,
+            ?string $file = null,
+            bool $forceLog = false,
+        ): void {
+            self::$logs[] = [
+                'message' => $message,
+                'level' => (int) $level,
+                'file' => $file,
+                'force' => $forceLog,
+            ];
         }
 
         /** @param array<string, mixed> $data */

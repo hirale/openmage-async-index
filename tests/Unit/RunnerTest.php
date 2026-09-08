@@ -106,6 +106,9 @@ class RunnerTest extends TestCase
             \Hirale_AsyncIndex_Helper_Data::LOG_LEVEL_WARNING,
             \Mage::$logs[0]['level'],
         );
+        // Forced: a store with dev/log/active off would otherwise drop the only
+        // signal that the index is drifting.
+        self::assertTrue(\Mage::$logs[0]['force']);
 
         // Still announced: the indexer may have written part of the record, and
         // invalidating one record too many is cheaper than missing one.

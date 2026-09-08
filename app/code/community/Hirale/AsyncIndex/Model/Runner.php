@@ -58,7 +58,7 @@ class Hirale_AsyncIndex_Model_Runner
                 'Drain left %d index event(s) failed; they are not retried.'
                 . ' Run "hirale:asyncindex:events" to list them.',
                 $result['errors'],
-            ), Hirale_AsyncIndex_Helper_Data::LOG_LEVEL_WARNING);
+            ), Hirale_AsyncIndex_Helper_Data::LOG_LEVEL_WARNING, force: true);
         }
 
         return $result;
