@@ -56,6 +56,8 @@ class FakeConnection
     public string $lastFetchRowSql = '';
     public int $updateResult = 0;
     public int $fetchOneResult = 0;
+    /** @var list<int> */
+    public array $fetchColResult = [];
     public int $insertId = 0;
     public int $transactionDepth = 0;
 
@@ -132,7 +134,7 @@ class FakeConnection
      */
     public function fetchCol(string $sql): array
     {
-        return [];
+        return $this->fetchColResult;
     }
 
     /**

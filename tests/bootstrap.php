@@ -40,6 +40,13 @@ if (!class_exists('Mage')) {
         /** @var list<array{message:string,level:int,file:?string}> */
         public static array $logs = [];
 
+        /** @var list<array{name:string,data:array<string, mixed>}> */
+        public static array $events = [];
+
+        public static ?Mage_Core_Model_App $app = null;
+
+        public static ?Throwable $eventException = null;
+
         // No LOG_* constants on purpose: OpenMage declares none, and Maho's are
         // Monolog enum cases rather than ints. A stub that carried int ones
         // would let module code compile here and fatal on both real platforms.
@@ -54,6 +61,9 @@ if (!class_exists('Mage')) {
             self::$enabledModules = [];
             self::$processes = [];
             self::$logs = [];
+            self::$events = [];
+            self::$app = null;
+            self::$eventException = null;
         }
 
         public static function helper(string $alias): object
@@ -124,6 +134,125 @@ if (!class_exists('Mage')) {
         public static function log(string $message, ?int $level = null, ?string $file = null): void
         {
             self::$logs[] = ['message' => $message, 'level' => (int) $level, 'file' => $file];
+        }
+
+        /** @param array<string, mixed> $data */
+        public static function dispatchEvent(string $name, array $data = []): void
+        {
+            if (self::$eventException !== null) {
+                $e = self::$eventException;
+                self::$eventException = null;
+                throw $e;
+            }
+            // Registry snapshot: lets a test prove an event was dispatched
+            // outside the drain / full-reindex context rather than inside it.
+            self::$events[] = ['name' => $name, 'data' => $data, 'registry' => self::$registry];
+        }
+
+        public static function app(): Mage_Core_Model_App
+        {
+            return self::$app ??= new \Mage_Core_Model_App();
+        }
+    }
+}
+
+if (!class_exists('Mage_Core_Model_App')) {
+    class Mage_Core_Model_App
+    {
+        /** @var list<array<int, string>> */
+        public array $cleanedTags = [];
+
+        /** @param array<int, string> $tags */
+        public function cleanCache($tags = []): self
+        {
+            $this->cleanedTags[] = $tags;
+            return $this;
+        }
+    }
+}
+
+if (!class_exists('Mage_Index_Model_Indexer_Abstract')) {
+    class Mage_Index_Model_Indexer_Abstract
+    {
+        /** @var list<list<int>> */
+        public array $reindexedEntities = [];
+
+        /** @param list<int> $ids */
+        public function reindexEntity(array $ids): void
+        {
+            $this->reindexedEntities[] = $ids;
+        }
+    }
+}
+
+if (!class_exists('Mage_Index_Model_Event')) {
+    class Mage_Index_Model_Event
+    {
+        public int $saves = 0;
+        /** @var array<int|string, string> */
+        public array $processIds = [];
+
+        public function __construct(
+            private int $id = 0,
+            private string $entity = '',
+            private ?int $entityPk = null,
+        ) {}
+
+        public function getId(): int
+        {
+            return $this->id;
+        }
+
+        public function getEntity(): string
+        {
+            return $this->entity;
+        }
+
+        public function getEntityPk(): ?int
+        {
+            return $this->entityPk;
+        }
+
+        public function addProcessId($processId, string $status = 'new'): self
+        {
+            $this->processIds[$processId] = $status;
+            return $this;
+        }
+
+        public function save(): self
+        {
+            $this->saves++;
+            return $this;
+        }
+    }
+}
+
+if (!class_exists('Mage_Index_Model_Resource_Event_Collection')) {
+    class Mage_Index_Model_Resource_Event_Collection
+    {
+        private int $cursor = 0;
+
+        /** @param list<Mage_Index_Model_Event> $events */
+        public function __construct(private array $events = []) {}
+
+        public function setPageSize(int $size): self
+        {
+            return $this;
+        }
+
+        public function setCurPage(int $page): self
+        {
+            return $this;
+        }
+
+        public function setOrder(string $field, string $direction): self
+        {
+            return $this;
+        }
+
+        public function fetchItem(): Mage_Index_Model_Event|false
+        {
+            return $this->events[$this->cursor++] ?? false;
         }
     }
 }
@@ -211,6 +340,54 @@ if (!class_exists('Mage_Index_Model_Process')) {
         public function getResource(): Mage_Index_Model_Resource_Process
         {
             return $this->resource;
+        }
+
+        /** @var list<Mage_Index_Model_Event> */
+        public array $unprocessedEvents = [];
+        /** @var list<Mage_Index_Model_Event> */
+        public array $processedEvents = [];
+        public bool $locked = false;
+        public ?Throwable $processEventException = null;
+        public ?Mage_Index_Model_Indexer_Abstract $indexer = null;
+
+        public function getIndexer(): ?Mage_Index_Model_Indexer_Abstract
+        {
+            return $this->indexer;
+        }
+
+        /** @return list<string> */
+        public function getDepends(): array
+        {
+            return [];
+        }
+
+        public function isLocked(): bool
+        {
+            return $this->locked;
+        }
+
+        public function lock(): void
+        {
+            $this->locked = true;
+        }
+
+        public function unlock(): void
+        {
+            $this->locked = false;
+        }
+
+        public function getUnprocessedEventsCollection(): Mage_Index_Model_Resource_Event_Collection
+        {
+            return new Mage_Index_Model_Resource_Event_Collection($this->unprocessedEvents);
+        }
+
+        public function processEvent(Mage_Index_Model_Event $event): self
+        {
+            if ($this->processEventException !== null) {
+                throw $this->processEventException;
+            }
+            $this->processedEvents[] = $event;
+            return $this;
         }
     }
 }
