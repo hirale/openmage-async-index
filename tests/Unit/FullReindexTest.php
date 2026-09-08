@@ -167,5 +167,59 @@ class FullReindexTest extends TestCase
 
         $runUpdates = array_column($resource->connection->updates, 'values');
         self::assertSame('succeeded', end($runUpdates)['status']);
+
+        // A global batch reindexes everything of its indexer and can name no
+        // ids, so it announces itself as a wholesale invalidation.
+        self::assertCount(1, \Mage::$events);
+        self::assertTrue(\Mage::$events[0]['data']['full']);
+        self::assertSame([], \Mage::$events[0]['data']['entities']);
+        self::assertSame('catalog_url', \Mage::$events[0]['data']['indexer_code']);
+    }
+
+    public function testAProductBatchAnnouncesTheIdsItReindexed(): void
+    {
+        \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
+        \Mage::$singletons['core/lock'] = new \Mage_Core_Model_Lock();
+
+        $resource = new FakeResource();
+        $resource->connection->updateResult = 1;
+        $resource->connection->fetchColResult = [1, 2, 3];
+        $resource->connection->fetchAllResponses = [
+            [[
+                'run_id' => 4,
+                'process_id' => 3,
+                'indexer_code' => 'catalog_product_price',
+                'mode' => 'product',
+                'status' => 'queued',
+                'cursor_value' => 0,
+                'total' => 10,
+                'processed' => 0,
+                'event_waterline' => 0,
+                'cancel_requested' => 0,
+            ]],
+            [['run_id' => 4, 'status' => 'running']],
+        ];
+        \Mage::$singletons['core/resource'] = $resource;
+
+        $process = new \Mage_Index_Model_Process(id: 3, indexerCode: 'catalog_product_price');
+        $process->indexer = new \Mage_Index_Model_Indexer_Abstract();
+        \Mage::$processes[3] = $process;
+
+        $result = (new \Hirale_AsyncIndex_Model_FullReindex())->runBatch(4);
+
+        self::assertSame(3, $result['processed']);
+        self::assertTrue($result['pending']);
+        self::assertSame([[1, 2, 3]], $process->indexer->reindexedEntities);
+
+        self::assertCount(1, \Mage::$events);
+        $payload = \Mage::$events[0]['data'];
+        self::assertSame('full_reindex', $payload['source']);
+        self::assertFalse($payload['full']);
+        self::assertSame(['catalog_product' => [1, 2, 3]], $payload['entities']);
+        self::assertSame('catalog_product_price', $payload['indexer_code']);
+
+        // Dispatched after the full-reindex context was dropped, so an observer
+        // cannot re-enter indexing from inside the batch.
+        self::assertSame([], \Mage::$events[0]['registry']);
     }
 }

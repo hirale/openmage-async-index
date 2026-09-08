@@ -25,6 +25,24 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     public const LOG_FILE = 'asyncindex.log';
 
     /**
+     * Fired once per drain and once per full-reindex batch, after the index
+     * lock is released. Hosts bind an observer here to invalidate whatever
+     * they cache on top of the index — nothing else in the async path does,
+     * and the synchronous purge core runs on save already happened, back when
+     * the index was still stale.
+     */
+    public const EVENT_REINDEX_AFTER = 'hirale_asyncindex_reindex_after';
+
+    /**
+     * Entities the built-in cache fallback knows a tag for. Everything else
+     * still reaches observers; only this module's own cleanCache is limited.
+     */
+    private const CACHE_TAG_ENTITIES = [
+        'catalog_product' => 'catalog_product',
+        'catalog_category' => 'catalog_category',
+    ];
+
+    /**
      * Syslog severities, the one log level both platforms accept. Mage's own
      * log-level constants are unusable here: OpenMage declares none at all, and
      * on Maho they are Monolog enum cases rather than ints. A plain int is what
@@ -225,6 +243,130 @@ class Hirale_AsyncIndex_Helper_Data extends Mage_Core_Helper_Abstract
     public static function fullRunDedupeKey(int $runId): string
     {
         return self::FULL_RUN_DEDUPE_PREFIX . $runId;
+    }
+
+    /**
+     * Announce what an index run touched, so hosts can invalidate on top of it.
+     *
+     * Callers dispatch after releasing the index lock: an observer that saves a
+     * model would otherwise re-enter indexing while the lock is still held.
+     *
+     * Ids are advisory and deliberately generous — core swallows an indexer's
+     * exception and marks the event failed rather than reporting it, so an id
+     * here means "this record was handed to its indexer", not "this record is
+     * certainly fresh". Invalidating one record too many is cheap; missing one
+     * is the bug this exists to fix.
+     *
+     * @param array<string, list<int>> $entities entity name => touched ids, an
+     *                                           empty list meaning every record
+     *                                           of that entity
+     */
+    public function notifyReindexed(
+        string $source,
+        array $entities = [],
+        bool $full = false,
+        ?string $indexerCode = null,
+    ): void {
+        $entities = $this->_normalizeEntityIds($entities);
+        if (!$full && $entities === []) {
+            return;
+        }
+
+        if (!$full && $this->_countEntityIds($entities) > $this->getInt('invalidate_entity_limit', 500)) {
+            // Past this many, carrying the list and acting on it costs more than
+            // invalidating the entity types wholesale.
+            $entities = array_fill_keys(array_keys($entities), []);
+        }
+
+        if ($this->getFlag('clean_cache_after_reindex')) {
+            $this->_cleanEntityCache($entities, $full);
+        }
+
+        try {
+            Mage::dispatchEvent(self::EVENT_REINDEX_AFTER, [
+                'source' => $source,
+                'full' => $full,
+                'entities' => $entities,
+                'indexer_code' => $indexerCode,
+            ]);
+        } catch (Throwable $e) {
+            // An observer must never fail the run: the message would be retried
+            // and the whole batch reindexed again.
+            $this->logException($e);
+        }
+    }
+
+    /**
+     * @param array<string, array<int|string>> $entities
+     * @return array<string, list<int>>
+     */
+    private function _normalizeEntityIds(array $entities): array
+    {
+        $normalized = [];
+        foreach ($entities as $entity => $ids) {
+            $entity = trim((string) $entity);
+            if ($entity === '') {
+                continue;
+            }
+
+            $ids = array_values(array_unique(array_map('intval', $ids)));
+
+            // A zero id is an event that named no single record — a mass action,
+            // a store-scope change — so every record of that entity is touched.
+            $normalized[$entity] = in_array(0, $ids, true) ? [] : $ids;
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @param array<string, list<int>> $entities
+     */
+    private function _countEntityIds(array $entities): int
+    {
+        $count = 0;
+        foreach ($entities as $ids) {
+            $count += count($ids);
+        }
+
+        return $count;
+    }
+
+    /**
+     * @param array<string, list<int>> $entities
+     */
+    private function _cleanEntityCache(array $entities, bool $full): void
+    {
+        $tags = [];
+        if ($full && $entities === []) {
+            // A global full reindex names no entity, so everything this
+            // fallback knows about has to go.
+            $tags = array_values(self::CACHE_TAG_ENTITIES);
+        }
+
+        foreach ($entities as $entity => $ids) {
+            $tag = self::CACHE_TAG_ENTITIES[$entity] ?? null;
+            if ($tag === null) {
+                continue;
+            }
+            if ($full || $ids === []) {
+                $tags[] = $tag;
+                continue;
+            }
+            foreach ($ids as $id) {
+                $tags[] = $tag . '_' . $id;
+            }
+        }
+
+        if ($tags === []) {
+            return;
+        }
+
+        try {
+            Mage::app()->cleanCache(array_values(array_unique($tags)));
+        } catch (Throwable $e) {
+            $this->logException($e);
+        }
     }
 
     /**

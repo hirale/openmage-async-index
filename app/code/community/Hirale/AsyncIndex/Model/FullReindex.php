@@ -158,13 +158,31 @@ class Hirale_AsyncIndex_Model_FullReindex
             return ['processed' => 0, 'pending' => true, 'locked' => true];
         }
 
+        $touched = [];
+        $indexerCode = null;
         try {
-            return $helper->withFullReindexContext(function () use ($runId): array {
-                return $this->_runBatch($runId);
-            });
+            $result = $helper->withFullReindexContext(
+                function () use ($runId, &$touched, &$indexerCode): array {
+                    return $this->_runBatch($runId, $touched, $indexerCode);
+                },
+            );
         } finally {
             $helper->releaseIndexLock(self::LOCK_NAME);
         }
+
+        // Announced outside the lock and outside the full-reindex context: an
+        // observer that saves a model would otherwise re-enter indexing from
+        // inside. A batch that reindexed nothing announces nothing.
+        if ($result['processed'] > 0) {
+            $helper->notifyReindexed(
+                'full_reindex',
+                $touched,
+                full: $touched === [],
+                indexerCode: $indexerCode,
+            );
+        }
+
+        return $result;
     }
 
     /**
@@ -198,9 +216,13 @@ class Hirale_AsyncIndex_Model_FullReindex
     }
 
     /**
+     * @param array<string, list<int>> $touched     entity name => reindexed ids,
+     *                                              empty for a global batch,
+     *                                              which reindexes everything
+     * @param ?string                  $indexerCode indexer this batch belongs to
      * @return array{processed:int, pending:bool, locked:bool}
      */
-    private function _runBatch(int $runId): array
+    private function _runBatch(int $runId, array &$touched, ?string &$indexerCode): array
     {
         $run = $this->_loadRun($runId);
         if ($run === null || !in_array($run['status'], [self::STATUS_QUEUED, self::STATUS_RUNNING], true)) {
@@ -224,8 +246,9 @@ class Hirale_AsyncIndex_Model_FullReindex
                 $this->_markRunning($runId, $process);
             }
 
+            $indexerCode = (string) $process->getIndexerCode();
             if ($run['mode'] === self::MODE_PRODUCT) {
-                $processed = $this->_runProductBatch($run, $process);
+                $processed = $this->_runProductBatch($run, $process, $touched);
             } else {
                 $processed = $this->_runGlobalBatch($run, $process);
             }
@@ -245,7 +268,10 @@ class Hirale_AsyncIndex_Model_FullReindex
         }
     }
 
-    private function _runProductBatch(array $run, Mage_Index_Model_Process $process): int
+    /**
+     * @param array<string, list<int>> $touched
+     */
+    private function _runProductBatch(array $run, Mage_Index_Model_Process $process, array &$touched): int
     {
         $ids = $this->_getNextProductIds((int) $run['cursor_value'], $this->_getHelper()->getInt('full_batch_size', 500));
         if ($ids === []) {
@@ -262,6 +288,7 @@ class Hirale_AsyncIndex_Model_FullReindex
         }
 
         $indexer->reindexEntity($ids);
+        $touched['catalog_product'] = $ids;
         $processed = count($ids);
         $newProcessed = (int) $run['processed'] + $processed;
         $newCursor = max($ids);

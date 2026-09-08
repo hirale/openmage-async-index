@@ -21,8 +21,9 @@ class Hirale_AsyncIndex_Model_Runner
             return ['processed' => 0, 'errors' => 0, 'pending' => $this->hasPendingEvents(), 'locked' => true];
         }
 
+        $touched = [];
         try {
-            return $helper->withDrainContext(function () use ($helper): array {
+            $result = $helper->withDrainContext(function () use ($helper, &$touched): array {
                 $fullReindex = Mage::getSingleton('hirale_asyncindex/fullReindex');
                 if ($fullReindex instanceof Hirale_AsyncIndex_Model_FullReindex && $fullReindex->hasActiveRuns()) {
                     $fullReindex->enqueueNextActiveRun();
@@ -32,6 +33,7 @@ class Hirale_AsyncIndex_Model_Runner
                 $result = $this->_drainPendingEvents(
                     $helper->getInt('batch_size', 200),
                     $helper->getInt('max_runtime_seconds', 45),
+                    $touched,
                 );
 
                 if ($result['pending'] && $result['processed'] > 0) {
@@ -43,6 +45,12 @@ class Hirale_AsyncIndex_Model_Runner
         } finally {
             $helper->releaseIndexLock(self::LOCK_NAME);
         }
+
+        // Announced outside the lock and outside the drain context: an observer
+        // that saves a model would otherwise re-enter indexing from inside.
+        $helper->notifyReindexed('drain', $touched);
+
+        return $result;
     }
 
     public function hasPendingEvents(): bool
@@ -56,9 +64,12 @@ class Hirale_AsyncIndex_Model_Runner
     }
 
     /**
+     * @param array<string, list<int>> $touched entity name => ids handed to an
+     *                                          indexer, collected for the
+     *                                          post-drain invalidation event
      * @return array{processed:int, errors:int, pending:bool}
      */
-    private function _drainPendingEvents(int $batchSize, int $maxRuntimeSeconds): array
+    private function _drainPendingEvents(int $batchSize, int $maxRuntimeSeconds, array &$touched): array
     {
         $processed = 0;
         $errors = 0;
@@ -86,6 +97,7 @@ class Hirale_AsyncIndex_Model_Runner
                     try {
                         $process->processEvent($event);
                         $event->save();
+                        $this->_recordTouched($touched, $event);
                     } catch (Throwable $e) {
                         $errors++;
                         $this->_markEventError($process, $event, $e);
@@ -159,6 +171,23 @@ class Hirale_AsyncIndex_Model_Runner
         unset($visiting[$code]);
         $visited[$code] = true;
         $ordered[] = $process;
+    }
+
+    /**
+     * An event with no entity pk named no single record — a mass action, a
+     * store-scope change — and is recorded as id 0, which the helper reads as
+     * "every record of this entity".
+     *
+     * @param array<string, list<int>> $touched
+     */
+    private function _recordTouched(array &$touched, Mage_Index_Model_Event $event): void
+    {
+        $entity = trim((string) $event->getEntity());
+        if ($entity === '') {
+            return;
+        }
+
+        $touched[$entity][] = (int) $event->getEntityPk();
     }
 
     private function _markEventError(Mage_Index_Model_Process $process, Mage_Index_Model_Event $event, Throwable $e): void

@@ -130,6 +130,69 @@ inserts a job.
   rate limit. This makes the reconciler cron the only crash-recovery mechanism
   there is — disabling it disables recovery.
 
+## Cache invalidation
+
+Core purges a saved record's cache tags **before** the index is rebuilt: both
+happen in `afterCommitCallback()`, and `cleanModelCache()` plus
+`catalog_product_save_commit_after` run first, with `processEntityAction()`
+after them. Synchronously that is harmless — the index is rebuilt in the same
+request. Asynchronously it is not: a page rendered between the purge and the
+drain caches the *stale* index, and nothing purges it again. Neither
+`Mage_Index` nor the catalog indexers invalidate anything of their own.
+
+So the module announces what it touched, once per drain and once per
+full-reindex batch:
+
+```php
+#[\Maho\Config\Observer('hirale_asyncindex_reindex_after')]   // Maho
+public function purgeReindexed(Varien_Event_Observer $observer): void
+{
+    $event = $observer->getEvent();
+    if ($event->getFull()) {
+        $this->purgeEverything();
+        return;
+    }
+
+    foreach ($event->getEntities() as $entity => $ids) {
+        // An empty list means every record of that entity.
+        $ids === [] ? $this->purgeEntity($entity) : $this->purgeIds($entity, $ids);
+    }
+}
+```
+
+On OpenMage, bind it in `config.xml` under
+`<global><events><hirale_asyncindex_reindex_after>` instead. The payload is the
+same on both:
+
+| Key | Meaning |
+| --- | --- |
+| `source` | `drain` or `full_reindex` |
+| `full` | everything was rebuilt; `entities` says nothing about scope |
+| `entities` | entity name (`catalog_product`, …) to touched ids; an **empty list means every record of that entity** |
+| `indexer_code` | the indexer for a full-reindex batch, `null` for a drain |
+
+Ids are deliberately generous. Core swallows an indexer's exception and marks
+the event failed rather than reporting it, so an id means "this record was
+handed to its indexer", not "this record is certainly fresh". Invalidating one
+record too many is cheap; missing one is the bug this exists to fix.
+
+An id list longer than *Invalidation Entity Limit* (500) is reported as the
+entity types wholesale instead — past that point, carrying and acting on the
+list costs more than invalidating the type.
+
+**Never save a model from this observer.** The event is dispatched after the
+index lock is released and outside the drain context, so a save would not
+deadlock — it would queue another drain, which announces again, which saves
+again. Invalidate, log, enqueue your own work; do not write.
+
+An observer that throws is caught and logged. Letting it escape would fail the
+message, and the whole batch would be reindexed on the retry.
+
+If you have no cache of your own, turn on *Clean Cache After Reindex*. It
+invalidates `catalog_product` / `catalog_category` tags through
+`Mage::app()->cleanCache()`, which also fires core's `application_clean_cache`.
+It is off by default because the event is the better extension point.
+
 ## Runtime
 
 Enable `Hirale > Async Index` only after the queue backend is configured and
