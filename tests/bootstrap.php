@@ -3,7 +3,17 @@
 declare(strict_types=1);
 
 if (!class_exists('Mage_Core_Helper_Abstract')) {
-    class Mage_Core_Helper_Abstract {}
+    class Mage_Core_Helper_Abstract
+    {
+        public function isModuleEnabled(string $moduleName): bool
+        {
+            return !empty(Mage::$enabledModules[$moduleName]);
+        }
+    }
+}
+
+if (!class_exists('Mage_Core_Helper_Data')) {
+    class Mage_Core_Helper_Data extends Mage_Core_Helper_Abstract {}
 }
 
 if (!class_exists('Mage')) {
@@ -21,6 +31,9 @@ if (!class_exists('Mage')) {
         /** @var array<string, mixed> */
         public static array $config = [];
 
+        /** @var array<string, bool> */
+        public static array $enabledModules = [];
+
         public static function reset(): void
         {
             self::$helper = null;
@@ -28,6 +41,7 @@ if (!class_exists('Mage')) {
             self::$singletons = [];
             self::$registry = [];
             self::$config = [];
+            self::$enabledModules = [];
         }
 
         public static function helper(string $alias): object
@@ -37,6 +51,9 @@ if (!class_exists('Mage')) {
             }
             if ($alias === 'hirale_asyncindex') {
                 return new \Hirale_AsyncIndex_Helper_Data();
+            }
+            if ($alias === 'core') {
+                return new \Mage_Core_Helper_Data();
             }
 
             throw new RuntimeException(sprintf('Helper %s is unavailable.', $alias));
@@ -123,6 +140,7 @@ if (!class_exists('Mage_Core_Model_Lock')) {
 }
 
 require_once __DIR__ . '/Support/QueueBusStub.php';
+require_once __DIR__ . '/Support/MahoQueueStub.php';
 require_once __DIR__ . '/Support/Stubs.php';
 require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Helper/Data.php';
 require_once __DIR__ . '/../app/code/community/Hirale/AsyncIndex/Message/DrainEventsMessage.php';

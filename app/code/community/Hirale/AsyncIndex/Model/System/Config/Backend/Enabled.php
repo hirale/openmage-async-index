@@ -39,7 +39,7 @@ class Hirale_AsyncIndex_Model_System_Config_Backend_Enabled extends Mage_Core_Mo
         }
 
         $session->addWarning($helper->__(
-            'Async Index is enabled, but Hirale Queue is unavailable. Configure Hirale Queue before expecting async indexing or queued full reindex jobs to run.',
+            'Async Index is enabled, but no message queue backend is available. Enable Maho_Queue (Maho) or install and configure Hirale Queue (OpenMage) before expecting async indexing or queued full reindex jobs to run.',
         ));
     }
 }

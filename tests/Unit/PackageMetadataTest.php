@@ -18,8 +18,11 @@ class PackageMetadataTest extends TestCase
 
         self::assertSame('hirale/openmage-async-index', $composer['name']);
         self::assertSame('magento-module', $composer['type']);
-        self::assertArrayHasKey('hirale/queue', $composer['require']);
+        self::assertArrayNotHasKey('hirale/queue', $composer['require']);
         self::assertArrayNotHasKey('mahocommerce/maho', $composer['require']);
+        // OpenMage users pull the queue backend in themselves; Maho dispatches
+        // through core Maho_Queue and must not drag hirale/queue along.
+        self::assertArrayHasKey('hirale/queue', $composer['suggest']);
         self::assertSame('<26.5', $composer['conflict']['mahocommerce/maho']);
         self::assertSame('<20.17', $composer['conflict']['openmage/magento-lts']);
         self::assertContains(
@@ -36,7 +39,7 @@ class PackageMetadataTest extends TestCase
         );
     }
 
-    public function testModuleDeclarationDependsOnIndexAndQueue(): void
+    public function testModuleDeclarationDependsOnIndexOnly(): void
     {
         $xml = simplexml_load_file(__DIR__ . '/../../app/etc/modules/Hirale_AsyncIndex.xml');
 
@@ -44,7 +47,25 @@ class PackageMetadataTest extends TestCase
         self::assertSame('true', (string) $xml->modules->Hirale_AsyncIndex->active);
         self::assertSame('community', (string) $xml->modules->Hirale_AsyncIndex->codePool);
         self::assertTrue(isset($xml->modules->Hirale_AsyncIndex->depends->Mage_Index));
-        self::assertTrue(isset($xml->modules->Hirale_AsyncIndex->depends->Hirale_Queue));
+        // A hard Hirale_Queue dependency aborts config loading on a Maho store,
+        // where the module dispatches through core Maho_Queue instead.
+        self::assertFalse(isset($xml->modules->Hirale_AsyncIndex->depends->Hirale_Queue));
+    }
+
+    public function testConfigRegistersBothQueueBackends(): void
+    {
+        $xml = simplexml_load_file(__DIR__ . '/../../app/code/community/Hirale/AsyncIndex/etc/config.xml');
+
+        self::assertNotFalse($xml);
+        self::assertSame('slow', (string) $xml->global->queue->routing->full_reindex);
+        self::assertSame(
+            'hirale_asyncindex/drainEventsHandler',
+            (string) $xml->global->hirale_queue->handlers->Hirale_AsyncIndex_Message_DrainEventsMessage,
+        );
+        self::assertSame(
+            'hirale_asyncindex/fullReindexBatchHandler',
+            (string) $xml->global->hirale_queue->handlers->Hirale_AsyncIndex_Message_FullReindexBatchMessage,
+        );
     }
 
     public function testConfigRewritesIndexerAndProcessWithoutAdminRouterOverride(): void
@@ -78,6 +99,6 @@ class PackageMetadataTest extends TestCase
         self::assertIsString($backend);
         self::assertStringContainsString('isQueueEnabled()', $backend);
         self::assertStringContainsString('addWarning', $backend);
-        self::assertStringContainsString('Hirale Queue is unavailable', $backend);
+        self::assertStringContainsString('no message queue backend is available', $backend);
     }
 }

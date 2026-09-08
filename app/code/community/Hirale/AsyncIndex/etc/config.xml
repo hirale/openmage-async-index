@@ -41,6 +41,16 @@
                 </setup>
             </hirale_asyncindex_setup>
         </resources>
+        <!--
+            Maho core queue: full-reindex batches get their own queue so they never
+            land in the resident "fast" pool. Drain rides the default queue, which
+            the catch-all pool consumes. Ignored by hirale/queue on OpenMage.
+        -->
+        <queue>
+            <routing>
+                <full_reindex>slow</full_reindex>
+            </routing>
+        </queue>
         <hirale_queue>
             <handlers>
                 <Hirale_AsyncIndex_Message_DrainEventsMessage>hirale_asyncindex/drainEventsHandler</Hirale_AsyncIndex_Message_DrainEventsMessage>

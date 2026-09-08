@@ -4,9 +4,13 @@
         <Hirale_AsyncIndex>
             <active>true</active>
             <codePool>community</codePool>
+            <!--
+                Hirale_Queue is deliberately not a hard dependency: on Maho the module
+                dispatches through core Maho_Queue and hirale/queue is not installed,
+                and an unmet <depends> aborts config loading for the whole store.
+            -->
             <depends>
                 <Mage_Index/>
-                <Hirale_Queue/>
             </depends>
         </Hirale_AsyncIndex>
     </modules>
