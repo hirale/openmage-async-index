@@ -151,6 +151,9 @@ class BatchDurationTest extends TestCase
 
         $process = new \Mage_Index_Model_Process(id: 3, indexerCode: 'catalog_product_price');
         $process->indexer = new \Mage_Index_Model_Indexer_Abstract();
+        $process->indexer->resource = new class {
+            public function reindexProductIds(array $ids): void {}
+        };
         \Mage::$processes[3] = $process;
 
         (new \Hirale_AsyncIndex_Model_FullReindex())->runBatch(4);

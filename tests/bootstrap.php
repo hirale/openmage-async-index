@@ -189,6 +189,15 @@ if (!class_exists('Mage_Index_Model_Indexer_Abstract')) {
         /** @var list<list<int>> */
         public array $reindexedEntities = [];
 
+        // What core's reindexEntity() probes for reindexProductIds() and its
+        // siblings; null stands in for an indexer with no resource model.
+        public ?object $resource = null;
+
+        public function getResource(): ?object
+        {
+            return $this->resource;
+        }
+
         /** @param list<int> $ids */
         public function reindexEntity(array $ids): void
         {

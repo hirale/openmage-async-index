@@ -221,6 +221,14 @@ Reindex Batch Size*. The rest — `catalog_url`, `catalog_category_flat`,
 `catalog_category_product` — rebuild in one piece: core exposes no checkpoint
 inside `reindexAll()`, so one batch is one message, however long it takes.
 
+A product-backed indexer is only split when its resource model can reindex by id
+(`reindexProductIds()`, `reindexEntities()` or `reindexProducts()`). Without one,
+core's `reindexEntity()` processes a mass-action event it never registered, the
+indexer finds nothing on it, and the batch silently does nothing. On Maho that
+is `catalogsearch_fulltext` and `catalog_product_attribute`, so those two rebuild
+in one piece as well. A run an earlier version queued as product batches is
+rebuilt in one piece when it executes.
+
 Each backend eventually decides a worker has died holding that message:
 
 | Backend | After | What happens |
