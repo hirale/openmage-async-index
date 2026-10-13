@@ -23,6 +23,14 @@ class Hirale_AsyncIndex_Model_FullReindex
     ];
 
     /**
+     * Resource methods core's reindexEntity() hands a product batch to. Without
+     * one it builds a mass-action event and processes it without register(), so
+     * the indexer finds no data on the event and reindexes nothing — on Maho
+     * that is catalogsearch_fulltext and catalog_product_attribute.
+     */
+    private const ENTITY_REINDEX_METHODS = ['reindexProductIds', 'reindexEntities', 'reindexProducts'];
+
+    /**
      * @return list<int>
      */
     public function scheduleRequiredRuns(): array
@@ -247,7 +255,9 @@ class Hirale_AsyncIndex_Model_FullReindex
             }
 
             $indexerCode = (string) $process->getIndexerCode();
-            if ($run['mode'] === self::MODE_PRODUCT) {
+            // Checked again here, not only when scheduling: a run queued as
+            // product by an earlier version would otherwise finish as a no-op.
+            if ($run['mode'] === self::MODE_PRODUCT && $this->_isProductBatchProcess($process)) {
                 $processed = $this->_runProductBatch($run, $process, $touched);
             } else {
                 $processed = $this->_runGlobalBatch($run, $process);
@@ -316,6 +326,8 @@ class Hirale_AsyncIndex_Model_FullReindex
         $this->_reportBatchDuration($process, self::MODE_GLOBAL, microtime(true) - $startedAt);
 
         $this->_connection()->update($this->_runTable(), [
+            'mode' => self::MODE_GLOBAL,
+            'total' => 1,
             'processed' => 1,
             'updated_at' => $this->_now(),
         ], ['run_id = ?' => (int) $run['run_id']]);
@@ -508,7 +520,27 @@ class Hirale_AsyncIndex_Model_FullReindex
 
     private function _isProductBatchProcess(Mage_Index_Model_Process $process): bool
     {
-        return isset(self::PRODUCT_BATCH_INDEXERS[(string) $process->getIndexerCode()]);
+        if (!isset(self::PRODUCT_BATCH_INDEXERS[(string) $process->getIndexerCode()])) {
+            return false;
+        }
+
+        $indexer = $process->getIndexer();
+        if (!is_object($indexer) || !method_exists($indexer, 'reindexEntity') || !method_exists($indexer, 'getResource')) {
+            return false;
+        }
+
+        $resource = $indexer->getResource();
+        if (!is_object($resource)) {
+            return false;
+        }
+
+        foreach (self::ENTITY_REINDEX_METHODS as $method) {
+            if (method_exists($resource, $method)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

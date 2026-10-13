@@ -6,6 +6,7 @@ namespace HiraleAsyncIndex\Tests\Unit;
 
 use Hirale\Queue\Bus;
 use HiraleAsyncIndex\Tests\Support\FakeResource;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class FullReindexTest extends TestCase
@@ -202,7 +203,7 @@ class FullReindexTest extends TestCase
         \Mage::$singletons['core/resource'] = $resource;
 
         $process = new \Mage_Index_Model_Process(id: 3, indexerCode: 'catalog_product_price');
-        $process->indexer = new \Mage_Index_Model_Indexer_Abstract();
+        $process->indexer = self::indexerWithResource(self::resourceWith('reindexProductIds'));
         \Mage::$processes[3] = $process;
 
         $result = (new \Hirale_AsyncIndex_Model_FullReindex())->runBatch(4);
@@ -221,5 +222,137 @@ class FullReindexTest extends TestCase
         // Dispatched after the full-reindex context was dropped, so an observer
         // cannot re-enter indexing from inside the batch.
         self::assertSame([], \Mage::$events[0]['registry']);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function entityReindexMethods(): iterable
+    {
+        yield 'price' => ['reindexProductIds'];
+        yield 'eav sub-indexer' => ['reindexEntities'];
+        yield 'stock' => ['reindexProducts'];
+    }
+
+    #[DataProvider('entityReindexMethods')]
+    public function testAnIndexerWhoseResourceReindexesByIdIsScheduledInProductBatches(string $method): void
+    {
+        $resource = self::scheduleFor(self::indexerWithResource(self::resourceWith($method)));
+
+        $run = $resource->connection->inserts[0]['values'];
+        self::assertSame('product', $run['mode']);
+        self::assertSame(3220, $run['total']);
+    }
+
+    public function testAnIndexerWhoseResourceCannotReindexByIdIsScheduledAsOneGlobalBatch(): void
+    {
+        // catalogsearch_fulltext on Maho: core's reindexEntity() would hand each
+        // batch an unregistered mass-action event, which the indexer ignores.
+        $resource = self::scheduleFor(self::indexerWithResource(self::resourceWith('rebuildIndex')));
+
+        $run = $resource->connection->inserts[0]['values'];
+        self::assertSame('global', $run['mode']);
+        self::assertSame(1, $run['total']);
+    }
+
+    public function testAnIndexerWithoutAResourceIsScheduledAsOneGlobalBatch(): void
+    {
+        $resource = self::scheduleFor(new \Mage_Index_Model_Indexer_Abstract());
+
+        self::assertSame('global', $resource->connection->inserts[0]['values']['mode']);
+    }
+
+    public function testAProductRunQueuedForAnIndexerThatCannotReindexByIdRebuildsItWhole(): void
+    {
+        // A run an earlier version queued as product must not finish as a no-op.
+        \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
+        \Mage::$singletons['core/lock'] = new \Mage_Core_Model_Lock();
+
+        $resource = new FakeResource();
+        $resource->connection->updateResult = 1;
+        $resource->connection->fetchColResult = [1, 2, 3];
+        $resource->connection->fetchAllResponses = [
+            [[
+                'run_id' => 81,
+                'process_id' => 7,
+                'indexer_code' => 'catalogsearch_fulltext',
+                'mode' => 'product',
+                'status' => 'queued',
+                'cursor_value' => 0,
+                'total' => 3220,
+                'processed' => 0,
+                'event_waterline' => 0,
+                'cancel_requested' => 0,
+            ]],
+            [['run_id' => 81, 'status' => 'succeeded']],
+        ];
+        \Mage::$singletons['core/resource'] = $resource;
+
+        $process = new \Mage_Index_Model_Process(id: 7, indexerCode: 'catalogsearch_fulltext');
+        $process->indexer = self::indexerWithResource(self::resourceWith('rebuildIndex'));
+        \Mage::$processes[7] = $process;
+
+        $result = (new \Hirale_AsyncIndex_Model_FullReindex())->runBatch(81);
+
+        self::assertSame(1, $result['processed']);
+        self::assertSame(1, $process->reindexEverythingCalls);
+        self::assertSame([], $process->indexer->reindexedEntities);
+
+        $runUpdates = array_column($resource->connection->updates, 'values');
+        self::assertContains(
+            ['mode' => 'global', 'total' => 1, 'processed' => 1],
+            array_map(
+                static fn(array $values): array => array_intersect_key($values, ['mode' => 0, 'total' => 0, 'processed' => 0]),
+                $runUpdates,
+            ),
+        );
+        self::assertSame('succeeded', end($runUpdates)['status']);
+
+        self::assertTrue(\Mage::$events[0]['data']['full']);
+        self::assertSame('catalogsearch_fulltext', \Mage::$events[0]['data']['indexer_code']);
+    }
+
+    private static function scheduleFor(\Mage_Index_Model_Indexer_Abstract $indexer): FakeResource
+    {
+        \Mage::$config = ['hirale_asyncindex/settings/enabled' => '1'];
+
+        $resource = new FakeResource();
+        $resource->connection->fetchOneResult = 3220;
+        $resource->connection->insertId = 12;
+        \Mage::$singletons['core/resource'] = $resource;
+
+        $process = new \Mage_Index_Model_Process(id: 7, indexerCode: 'catalogsearch_fulltext');
+        $process->indexer = $indexer;
+
+        self::assertSame(12, (new \Hirale_AsyncIndex_Model_FullReindex())->scheduleProcess($process, 'test'));
+        self::assertCount(1, $resource->connection->inserts);
+
+        return $resource;
+    }
+
+    private static function indexerWithResource(object $resource): \Mage_Index_Model_Indexer_Abstract
+    {
+        $indexer = new \Mage_Index_Model_Indexer_Abstract();
+        $indexer->resource = $resource;
+
+        return $indexer;
+    }
+
+    private static function resourceWith(string $method): object
+    {
+        return match ($method) {
+            'reindexProductIds' => new class {
+                public function reindexProductIds(array $ids): void {}
+            },
+            'reindexEntities' => new class {
+                public function reindexEntities(array $ids): void {}
+            },
+            'reindexProducts' => new class {
+                public function reindexProducts(array $ids): void {}
+            },
+            'rebuildIndex' => new class {
+                public function rebuildIndex(?int $storeId = null, ?array $ids = null): void {}
+            },
+        };
     }
 }
