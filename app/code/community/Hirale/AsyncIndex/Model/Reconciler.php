@@ -17,13 +17,11 @@ class Hirale_AsyncIndex_Model_Reconciler
             $this->_getFullReindex()->scheduleRequiredRuns();
         }
 
-        $runner = $this->_getRunner();
-        if (!$runner->hasPendingEvents() && !$this->_getFullReindex()->hasActiveRuns()) {
-            return;
-        }
+        $this->_getFullReindex()->enqueueNextActiveRun();
 
-        if ($this->_getFullReindex()->hasActiveRuns()) {
-            $this->_getFullReindex()->enqueueNextActiveRun();
+        // Not skipped while a run is active: a drain only steps around the
+        // processes that run is rebuilding, so it can still make progress.
+        if (!$this->_getRunner()->hasPendingEvents()) {
             return;
         }
 
