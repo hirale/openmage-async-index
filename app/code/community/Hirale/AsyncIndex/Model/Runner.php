@@ -27,16 +27,16 @@ class Hirale_AsyncIndex_Model_Runner
         $touched = [];
         try {
             $result = $helper->withDrainContext(function () use ($helper, &$touched): array {
-                $fullReindex = Mage::getSingleton('hirale_asyncindex/fullReindex');
-                if ($fullReindex instanceof Hirale_AsyncIndex_Model_FullReindex && $fullReindex->hasActiveRuns()) {
-                    $fullReindex->enqueueNextActiveRun();
-                    return ['processed' => 0, 'errors' => 0, 'pending' => true, 'locked' => false];
+                $yielding = $this->_getProcessIdsUnderFullReindex();
+                if ($yielding !== []) {
+                    $this->_getFullReindex()->enqueueNextActiveRun();
                 }
 
                 $result = $this->_drainPendingEvents(
                     $helper->getInt('batch_size', 200),
                     $helper->getInt('max_runtime_seconds', 45),
                     $touched,
+                    $yielding,
                 );
 
                 if ($result['pending'] && $result['processed'] > 0) {
@@ -81,9 +81,13 @@ class Hirale_AsyncIndex_Model_Runner
      * @param array<string, list<int>> $touched entity name => ids handed to an
      *                                          indexer, collected for the
      *                                          post-drain invalidation event
+     * @param list<int>                $yielding  processes a full reindex is
+     *                                          rebuilding; their events wait
+     *                                          for the drain the run queues
+     *                                          when it ends
      * @return array{processed:int, errors:int, pending:bool}
      */
-    private function _drainPendingEvents(int $batchSize, int $maxRuntimeSeconds, array &$touched): array
+    private function _drainPendingEvents(int $batchSize, int $maxRuntimeSeconds, array &$touched, array $yielding = []): array
     {
         $processed = 0;
         $errors = 0;
@@ -95,7 +99,10 @@ class Hirale_AsyncIndex_Model_Runner
                 break;
             }
 
-            if ($process->getMode() === Mage_Index_Model_Process::MODE_MANUAL || $process->isLocked()) {
+            if ($process->getMode() === Mage_Index_Model_Process::MODE_MANUAL
+                || in_array((int) $process->getId(), $yielding, true)
+                || $process->isLocked()
+            ) {
                 continue;
             }
 
@@ -129,8 +136,53 @@ class Hirale_AsyncIndex_Model_Runner
         return [
             'processed' => $processed,
             'errors' => $errors,
-            'pending' => $this->_getPendingEventCount() > 0,
+            'pending' => $this->_getPendingEventCount($yielding) > 0,
         ];
+    }
+
+    /**
+     * Every process an active full-reindex run will lock: the run's own, plus
+     * the dependencies core's reindexEverything() rebuilds ahead of it. Queued
+     * runs count too, since their batch may start at any moment. A drain that
+     * held one of these locks would make that reindexAll() throw.
+     *
+     * @return list<int>
+     */
+    private function _getProcessIdsUnderFullReindex(): array
+    {
+        $activeIds = $this->_getFullReindex()->getActiveProcessIds();
+        if ($activeIds === []) {
+            return [];
+        }
+
+        $byCode = [];
+        $codeById = [];
+        foreach ($this->getOrderedProcesses() as $process) {
+            $byCode[(string) $process->getIndexerCode()] = $process;
+            $codeById[(int) $process->getId()] = (string) $process->getIndexerCode();
+        }
+
+        $yielding = [];
+        $stack = $activeIds;
+        while ($stack !== []) {
+            $id = array_pop($stack);
+            if (isset($yielding[$id])) {
+                continue;
+            }
+            $yielding[$id] = true;
+
+            $process = $byCode[$codeById[$id] ?? ''] ?? null;
+            if ($process === null) {
+                continue;
+            }
+            foreach ($process->getDepends() as $dependencyCode) {
+                if (isset($byCode[$dependencyCode])) {
+                    $stack[] = (int) $byCode[$dependencyCode]->getId();
+                }
+            }
+        }
+
+        return array_keys($yielding);
     }
 
     /**
@@ -321,7 +373,10 @@ class Hirale_AsyncIndex_Model_Runner
         }
     }
 
-    private function _getPendingEventCount(): int
+    /**
+     * @param list<int> $excludeProcessIds
+     */
+    private function _getPendingEventCount(array $excludeProcessIds = []): int
     {
         $resource = Mage::getSingleton('core/resource');
         $connection = $resource->getConnection('core_read');
@@ -335,8 +390,21 @@ class Hirale_AsyncIndex_Model_Runner
             $connection->quote(Mage_Index_Model_Process::EVENT_STATUS_NEW),
             $connection->quote(Mage_Index_Model_Process::MODE_MANUAL),
         );
+        if ($excludeProcessIds !== []) {
+            $sql .= sprintf(' AND pe.process_id NOT IN (%s)', implode(', ', array_map('intval', $excludeProcessIds)));
+        }
 
         return (int) $connection->fetchOne($sql);
+    }
+
+    private function _getFullReindex(): Hirale_AsyncIndex_Model_FullReindex
+    {
+        $fullReindex = Mage::getSingleton('hirale_asyncindex/fullReindex');
+        if (!$fullReindex instanceof Hirale_AsyncIndex_Model_FullReindex) {
+            throw new RuntimeException('Hirale AsyncIndex full reindex runner is unavailable.');
+        }
+
+        return $fullReindex;
     }
 
     private function _getHelper(): Hirale_AsyncIndex_Helper_Data

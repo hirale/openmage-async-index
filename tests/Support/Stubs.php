@@ -57,6 +57,7 @@ class FakeConnection
     public string $lastFetchAllSql = '';
     public string $lastFetchColSql = '';
     public string $lastFetchRowSql = '';
+    public string $lastFetchOneSql = '';
     public int $updateResult = 0;
     public int $fetchOneResult = 0;
     /** @var list<int> */
@@ -139,6 +140,7 @@ class FakeConnection
 
     public function fetchOne(string $sql): int
     {
+        $this->lastFetchOneSql = $sql;
         return $this->fetchOneResult;
     }
 

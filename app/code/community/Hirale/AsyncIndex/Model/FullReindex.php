@@ -4,7 +4,15 @@ declare(strict_types=1);
 
 class Hirale_AsyncIndex_Model_FullReindex
 {
-    private const LOCK_NAME = 'hirale_asyncindex_drain';
+    /**
+     * Serialises full-reindex batches among themselves only. Drains take their
+     * own lock and step around the processes a run is rebuilding instead, so a
+     * rebuild that takes minutes no longer holds back every other indexer.
+     */
+    private const LOCK_NAME = 'hirale_asyncindex_full_reindex';
+
+    /** How long a batch waits for a drain to let go of one of its processes. */
+    private const BUSY_RETRY_SECONDS = 15;
     private const STATUS_QUEUED = 'queued';
     private const STATUS_RUNNING = 'running';
     private const STATUS_SUCCEEDED = 'succeeded';
@@ -141,6 +149,21 @@ class Hirale_AsyncIndex_Model_FullReindex
     }
 
     /**
+     * Processes with a queued or running run: the ones a drain must leave alone.
+     *
+     * @return list<int>
+     */
+    public function getActiveProcessIds(): array
+    {
+        return array_values(array_unique(array_map('intval', $this->_connection()->fetchCol(sprintf(
+            'SELECT DISTINCT process_id FROM %s WHERE status IN (%s, %s)',
+            $this->_runTable(),
+            $this->_connection()->quote(self::STATUS_QUEUED),
+            $this->_connection()->quote(self::STATUS_RUNNING),
+        )))));
+    }
+
+    /**
      * @param bool $continuation true when this run's own handler is enqueueing
      *                           the next batch; its row is still processing
      *                           under the run's dedupe key and would otherwise
@@ -162,7 +185,7 @@ class Hirale_AsyncIndex_Model_FullReindex
         }
 
         if (!$helper->acquireIndexLock(self::LOCK_NAME)) {
-            $this->enqueueRun($runId, 15, continuation: true);
+            $this->enqueueRun($runId, self::BUSY_RETRY_SECONDS, continuation: true);
             return ['processed' => 0, 'pending' => true, 'locked' => true];
         }
 
@@ -245,8 +268,16 @@ class Hirale_AsyncIndex_Model_FullReindex
 
         if ((int) ($run['cancel_requested'] ?? 0) === 1) {
             $this->_cancelRun($runId, $process);
+            $this->_drainWhatTheRunHeldBack();
             $this->enqueueNextActiveRun();
             return ['processed' => 0, 'pending' => $this->hasActiveRuns(), 'locked' => false];
+        }
+
+        // A drain that started before this run was queued may still hold one of
+        // its processes, and core's reindexAll() throws on a locked process.
+        if ($this->_isAnyProcessLocked($process)) {
+            $this->enqueueRun($runId, self::BUSY_RETRY_SECONDS, continuation: true);
+            return ['processed' => 0, 'pending' => true, 'locked' => true];
         }
 
         try {
@@ -269,13 +300,64 @@ class Hirale_AsyncIndex_Model_FullReindex
                 return ['processed' => $processed, 'pending' => true, 'locked' => false];
             }
 
+            $this->_drainWhatTheRunHeldBack();
             $this->enqueueNextActiveRun();
             return ['processed' => $processed, 'pending' => $this->hasActiveRuns(), 'locked' => false];
         } catch (Throwable $e) {
             $this->_failRun($runId, $e->getMessage());
             $this->_getHelper()->logException($e);
+            $this->_drainWhatTheRunHeldBack();
             throw $e;
         }
+    }
+
+    /**
+     * Drains step around a process while its run is active, so the events that
+     * arrived meanwhile wait for this. No dedupe key: a drain already in flight
+     * may have decided to skip this process before the run ended, and would
+     * otherwise swallow the one dispatch meant to pick those events up.
+     */
+    private function _drainWhatTheRunHeldBack(): void
+    {
+        $runner = Mage::getSingleton('hirale_asyncindex/runner');
+        if ($runner instanceof Hirale_AsyncIndex_Model_Runner && $runner->hasPendingEvents()) {
+            $this->_getHelper()->enqueueDrain(reason: 'full_reindex_finished', dedupe: false);
+        }
+    }
+
+    /**
+     * The run's process and every dependency reindexEverything() will rebuild
+     * ahead of it, each of which reindexAll() refuses while locked.
+     */
+    private function _isAnyProcessLocked(Mage_Index_Model_Process $process): bool
+    {
+        $indexer = Mage::getSingleton('index/indexer');
+        $seen = [];
+        $stack = [$process];
+        while ($stack !== []) {
+            $current = array_pop($stack);
+            $code = (string) $current->getIndexerCode();
+            if (isset($seen[$code])) {
+                continue;
+            }
+            $seen[$code] = true;
+
+            if ($current->isLocked()) {
+                return true;
+            }
+
+            if (!$indexer instanceof Mage_Index_Model_Indexer) {
+                continue;
+            }
+            foreach ($current->getDepends() as $dependencyCode) {
+                $dependency = $indexer->getProcessByCode($dependencyCode);
+                if ($dependency instanceof Mage_Index_Model_Process) {
+                    $stack[] = $dependency;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

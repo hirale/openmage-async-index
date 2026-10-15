@@ -102,7 +102,13 @@ if (!class_exists('Mage')) {
                 return self::$singletons[$alias];
             }
 
-            throw new RuntimeException(sprintf('Singleton %s is unavailable.', $alias));
+            // Always resolvable on a real install, so tests that do not care
+            // about them get one built from the stubbed state.
+            return self::$singletons[$alias] = match ($alias) {
+                'index/indexer' => new \Mage_Index_Model_Indexer(array_values(self::$processes)),
+                'hirale_asyncindex/runner' => new \Hirale_AsyncIndex_Model_Runner(),
+                default => throw new RuntimeException(sprintf('Singleton %s is unavailable.', $alias)),
+            };
         }
 
         public static function getStoreConfigFlag(string $path): bool
@@ -386,10 +392,13 @@ if (!class_exists('Mage_Index_Model_Process')) {
             return $this->indexer;
         }
 
+        /** @var list<string> indexer codes, as core reads them from config */
+        public array $depends = [];
+
         /** @return list<string> */
         public function getDepends(): array
         {
-            return [];
+            return $this->depends;
         }
 
         public function isLocked(): bool
@@ -464,6 +473,17 @@ if (!class_exists('Mage_Index_Model_Indexer')) {
         public function getProcessesCollection(): array
         {
             return $this->processes;
+        }
+
+        public function getProcessByCode(string $code): Mage_Index_Model_Process|false
+        {
+            foreach ($this->processes as $process) {
+                if ($process->getIndexerCode() === $code) {
+                    return $process;
+                }
+            }
+
+            return false;
         }
     }
 }

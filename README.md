@@ -83,7 +83,9 @@ catch-all (`slow`) pool consumes it — the same place it went before.
 
 The catch-all pool is on-demand: it exits after 60 seconds idle and the
 watchdog cron restarts it once a minute, so a drain can wait up to about a
-minute on a quiet store. If that matters, route the queue from your own
+minute on a quiet store. It is also where `full_reindex` batches run, one at a
+time, and a single global batch can take many minutes; a drain queued behind
+one waits for it to finish. If either matters, route the queue from your own
 `config.xml` or `app/etc/local.xml`:
 
 ```xml
@@ -307,3 +309,22 @@ product ID batches. Indexers that cannot be safely split by product still run
 through the same async full reindex coordinator as a global batch unit, so admin
 and CLI calls do not perform the heavy full reindex inside the request process
 while async index is enabled.
+
+### Drains during a full reindex
+
+A drain leaves alone only what an active run (queued or running) is
+rebuilding: the run's own indexer and the dependencies core's
+`reindexEverything()` rebuilds ahead of it, since `reindexAll()` throws on a
+process someone else has locked. Every other indexer keeps draining, and so do
+indexers that depend on the one being rebuilt. Drains and full batches take
+separate locks; a batch that finds one of its processes locked by a drain
+retries 15 seconds later instead of failing the run.
+
+The events held back are picked up when the run ends — succeeded, canceled or
+failed — by a drain the run queues itself. That drain carries no dedupe key: one
+already in flight may have decided to skip the process before the run ended. The
+reconciler also keeps dispatching drains while a run is active.
+
+Before 2.2.0, any active run made every drain step aside until the reconciler's
+next tick after the run, so a rebuild of `catalog_category_product` held back
+stock, price and catalog updates for its whole length.
